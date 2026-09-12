@@ -46,14 +46,14 @@
   </ItemGroup>
 
   <ItemGroup Label="Test">
-    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.10.0" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
     <PackageVersion Include="coverlet.collector" Version="10.0.1" />
     <PackageVersion Include="Shouldly" Version="4.3.0" />
     <PackageVersion Include="NSubstitute" Version="6.2.0" />
     <PackageVersion Include="Spectre.Console.Testing" Version="0.57.2" />
-    <PackageVersion Include="Verify.XunitV3" Version="31.28.0" />
-    <PackageVersion Include="WireMock.Net" Version="2.14.0" />
+    <PackageVersion Include="Verify.XunitV3" Version="32.0.1" />
+    <PackageVersion Include="WireMock.Net" Version="2.15.0" />
     <!-- FakeTimeProvider. Polling is the component most worth testing and the one
          most tempting to test with real delays; a fake clock keeps the suite fast
          and makes timeout assertions exact rather than flaky. -->
@@ -65,10 +65,10 @@
        the per-TFM ItemGroup keeps the wrong-protocol package out of the wrong-TFM
        restore graph entirely. See ADR 0005. -->
   <ItemGroup Label="Test xunit.v3 (net8)" Condition="'$(TargetFramework)' == 'net8.0'">
-    <PackageVersion Include="xunit.v3" Version="3.2.2" />
+    <PackageVersion Include="xunit.v3" Version="4.0.0" />
   </ItemGroup>
   <ItemGroup Label="Test xunit.v3.mtp-v2 (net10)" Condition="'$(TargetFramework)' == 'net10.0'">
-    <PackageVersion Include="xunit.v3.mtp-v2" Version="3.2.2" />
+    <PackageVersion Include="xunit.v3.mtp-v2" Version="4.0.0" />
   </ItemGroup>
 
   <ItemGroup Label="Test net8.0 overrides">

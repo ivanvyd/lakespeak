@@ -79,7 +79,76 @@ public class OutputFidelityTests
 
         // Assert
         var dataLine = csv.Split('\n')[1].TrimEnd('\r');
-        dataLine.ShouldBe(",");
+        dataLine.ShouldBe(",\"\"");
+    }
+
+    [Fact]
+    public void Json_lines_rejects_duplicate_column_names_before_writing_any_rows()
+    {
+        // Arrange — a JSON object cannot carry both cells under the same property name. The
+        // previous dictionary writer silently replaced the first value with the second.
+        var response = Response(null, Result(("amount", "first"), ("amount", "second")));
+
+        // Act
+        using var destination = new StringWriter();
+        var act = () => MachineOutput.WriteJsonLines(destination, response);
+
+        // Assert
+        var exception = Should.Throw<InvalidOperationException>(act);
+        exception.Message.ShouldContain("amount");
+        exception.Message.ShouldContain("duplicate", Case.Insensitive);
+        destination.ToString().ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void Json_lines_omits_cells_missing_from_a_short_row()
+    {
+        var result = new GenieQueryResult(
+            [
+                new GenieColumn("present", "STRING", "STRING"),
+                new GenieColumn("missing", "STRING", "STRING"),
+            ],
+            [["value"]],
+            IsTruncated: false,
+            TotalRowCount: 1);
+
+        using var row = System.Text.Json.JsonDocument.Parse(
+            MachineOutput.ToJsonLines(Response(null, result)));
+
+        row.RootElement.GetProperty("present").GetString().ShouldBe("value");
+        row.RootElement.TryGetProperty("missing", out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void Json_lines_for_a_zero_row_result_is_an_explicit_empty_stream()
+    {
+        var result = new GenieQueryResult(
+            [new GenieColumn("value", "STRING", "STRING")],
+            [],
+            IsTruncated: false,
+            TotalRowCount: 0);
+
+        MachineOutput.ToJsonLines(Response(null, result)).ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void Json_lines_rejects_cells_beyond_the_declared_columns()
+    {
+        // Arrange — without an explicit check the second cell is silently dropped because no
+        // JSON property exists to name it.
+        var result = new GenieQueryResult(
+            [new GenieColumn("first", "STRING", "STRING")],
+            [["kept", "lost"]],
+            IsTruncated: false,
+            TotalRowCount: 1);
+        var response = Response(null, result);
+
+        // Act
+        var act = () => MachineOutput.ToJsonLines(response);
+
+        // Assert
+        Should.Throw<InvalidOperationException>(act)
+            .Message.ShouldContain("2 cells");
     }
 
     [Theory]

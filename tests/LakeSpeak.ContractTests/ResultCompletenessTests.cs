@@ -434,6 +434,79 @@ public sealed class ResultCompletenessTests : IDisposable
     }
 
     [Fact]
+    public async Task An_oversized_first_chunk_is_returned_whole_without_fetching_another_chunk()
+    {
+        // Arrange — MaxResultRows is a fetch threshold, not a hard returned-row limit. Trimming
+        // rows which already arrived would silently alter the documented public contract.
+        StubQueryResult(
+            """
+            {
+              "row_count": 3, "chunk_index": 0, "next_chunk_index": 1,
+              "next_chunk_internal_link": "/api/2.0/sql/statements/s1/result/chunks/1",
+              "data_array": [["Germany"],["France"],["Spain"]]
+            }
+            """,
+            manifestExtra: """, "total_row_count": 5""");
+
+        var http = new HttpClient { BaseAddress = new Uri(_server.Url!) };
+        var client = new GenieClient(http, Options.Create(new GenieClientOptions
+        {
+            Host = new Uri("https://example.azuredatabricks.net"),
+            MaxResultRows = 2,
+        }));
+
+        // Act
+        var result = await client.GetQueryResultAsync(Agent, Conversation, Message, Attachment, Ct);
+
+        // Assert
+        result!.Rows.Count.ShouldBe(3);
+        result.IsTruncated.ShouldBeTrue();
+        _server.LogEntries.Count(entry =>
+            entry.RequestMessage?.Path?.Contains("chunks", StringComparison.Ordinal) == true).ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task An_oversized_later_chunk_is_returned_whole_then_stops_further_fetches()
+    {
+        // Arrange — the client is below the threshold when chunk one is requested. All cells in
+        // that response remain visible even though appending it crosses the threshold.
+        StubQueryResult(
+            """
+            {
+              "row_count": 1, "chunk_index": 0, "next_chunk_index": 1,
+              "next_chunk_internal_link": "/api/2.0/sql/statements/s1/result/chunks/1",
+              "data_array": [["Germany"]]
+            }
+            """,
+            manifestExtra: """, "total_row_count": 6""");
+        StubChunk(1,
+            """
+            {
+              "row_count": 3, "chunk_index": 1, "next_chunk_index": 2,
+              "next_chunk_internal_link": "/api/2.0/sql/statements/s1/result/chunks/2",
+              "data_array": [["France"],["Spain"],["Italy"]]
+            }
+            """);
+        StubChunk(2, """{ "row_count": 2, "chunk_index": 2, "data_array": [["Japan"],["Brazil"]] }""");
+
+        var http = new HttpClient { BaseAddress = new Uri(_server.Url!) };
+        var client = new GenieClient(http, Options.Create(new GenieClientOptions
+        {
+            Host = new Uri("https://example.azuredatabricks.net"),
+            MaxResultRows = 2,
+        }));
+
+        // Act
+        var result = await client.GetQueryResultAsync(Agent, Conversation, Message, Attachment, Ct);
+
+        // Assert
+        result!.Rows.Count.ShouldBe(4);
+        result.IsTruncated.ShouldBeTrue();
+        _server.LogEntries.Count(entry =>
+            entry.RequestMessage?.Path?.Contains("chunks", StringComparison.Ordinal) == true).ShouldBe(1);
+    }
+
+    [Fact]
     public async Task A_short_read_against_the_manifest_row_count_is_reported_as_truncated()
     {
         // Arrange — the same failure reached a different way: the manifest advertises more rows

@@ -44,13 +44,17 @@ internal static class GlobalOptions
     /// </param>
     internal static OutputFormat ResolveFormat(ParseResult parseResult, string? configuredDefault = null)
     {
-        // The flag wins; the configured default is the fallback. System.CommandLine always
-        // supplies "text" for an absent flag, so an explicit default is indistinguishable from
-        // no flag — which is why the config value is only consulted when the result is "text".
-        var raw = parseResult.GetValue(Format);
-        if (raw == "text" && configuredDefault is { Length: > 0 })
+        // OptionResult.Implicit distinguishes the default value from an explicit format flag.
+        // Comparing only the parsed string made a configured JSON default override an explicit
+        // request for text.
+        var formatResult = parseResult.GetResult(Format);
+        var raw = formatResult is null || formatResult.Implicit
+            ? configuredDefault ?? parseResult.GetValue(Format)
+            : parseResult.GetValue(Format);
+
+        if (string.IsNullOrWhiteSpace(raw))
         {
-            raw = configuredDefault;
+            raw = "text";
         }
 
         if (!OutputFormatExtensions.TryParse(raw, out var format))

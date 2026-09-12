@@ -6,6 +6,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="NSubstitute" />
     <PackageReference Include="Verify.XunitV3" />
     <PackageReference Include="Spectre.Console.Testing" />
     <ProjectReference Include="..\..\src\LakeSpeak.Cli\LakeSpeak.Cli.csproj" />

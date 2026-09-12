@@ -22,6 +22,7 @@ metadata:
 
 spec:
   agent: platform-operations
+  profile: automation-workspace
 
   questions:
     - id: failed-jobs
@@ -50,6 +51,10 @@ The full schema is published at
 **`spec.agent` is required and never inferred.** A report that silently ran against a different
 Agent is worse than one that failed.
 
+**`spec.profile` is optional and cannot be blank.** When present it selects the Databricks profile
+for this pack. An explicit `--profile` still wins; otherwise the pack profile wins over an Agent
+alias profile and `defaults.profile`.
+
 **`behavior.continueOnQuestionFailure`** (default `true`) finishes the run and records failures in
 place, exiting `8`. Set it to `false` to stop at the first failure. For a scheduled report, partial
 results usually beat none.
@@ -58,9 +63,17 @@ results usually beat none.
 can be traced back in Databricks. It is off by default because those ids identify a conversation
 containing governed data, and reports get committed.
 
-**`spec.output.path`** is relative to the pack file. Absolute paths and anything resolving outside
-the pack's directory are rejected at load time — a pack can arrive in a pull request, so its output
-path is attacker-influenced.
+**`behavior.timeout`** (default `10m`) is the wait for questions without their own timeout. A
+question's positive `timeout` value overrides it. The timer limit is about 24.9 days (`596h` when
+written in whole hours). Invalid, zero, overflowing, and longer durations are reported together
+with the pack's other validation errors.
+
+**`spec.output.path`** is relative to the pack file. Absolute paths, paths outside the pack
+directory, and paths passing through a symbolic link or junction are rejected — a pack can arrive
+in a pull request, so its output path is attacker-influenced. The destination is prepared before
+any warehouse call. LakeSpeak stages a complete report next to the destination and installs it
+atomically, so a failed or cancelled write does not truncate an existing report. An explicit
+`--output` may name another directory, but receives the same link and atomic-write checks.
 
 ## How a pack runs
 
@@ -86,6 +99,10 @@ suspect.
   apart from the timestamp and timings, which is what makes a committed report reviewable in a
   diff.
 - **Capped at 50 questions.** Beyond that it is a scheduled job, not a report.
+
+Each question id becomes an explicit stable report anchor. When generated SQL is included, the
+report also lists the parameter values Genie bound to it; SQL without those values is not a full
+record of what ran.
 
 ## Reports carry a warning
 

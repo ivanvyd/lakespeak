@@ -1,5 +1,6 @@
 using System.CommandLine;
 using System.Reflection;
+using System.Text;
 using LakeSpeak.Cli.Console;
 using LakeSpeak.QuestionPacks;
 using Spectre.Console;
@@ -33,7 +34,7 @@ internal static class PackCommand
             Force,
         };
         run.SetAction((parseResult, cancellationToken) =>
-            CliHost.RunAsync(parseResult, (host, ct) => RunAsync(host, parseResult, ct), cancellationToken));
+            RunWithProfileAsync(parseResult, cancellationToken));
 
         var init = new Command("init", "Write a starter Question Pack.")
         {
@@ -75,20 +76,67 @@ internal static class PackCommand
         }
     }
 
-    private static async Task<int> RunAsync(CliHost host, ParseResult parseResult, CancellationToken cancellationToken)
+    private static async Task<int> RunWithProfileAsync(
+        ParseResult parseResult,
+        CancellationToken cancellationToken)
     {
-        var path = RequirePath(parseResult);
         QuestionPack pack;
 
         try
         {
-            pack = QuestionPackLoader.Load(path);
+            pack = QuestionPackLoader.Load(RequirePath(parseResult));
         }
         catch (PackValidationException ex)
         {
-            host.Output.Fail(ex.Message);
-            return ExitCode.InvalidUsage;
+            return await CliHost.RunAsync(
+                parseResult,
+                (host, _) =>
+                {
+                    host.Output.Fail(ex.Message);
+                    return Task.FromResult(ExitCode.InvalidUsage);
+                },
+                cancellationToken).ConfigureAwait(false);
         }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return await CliHost.RunAsync(
+                parseResult,
+                (_, _) => Task.FromException<int>(ex),
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        return await CliHost.RunAsync(
+            parseResult,
+            (host, ct) => RunAsync(host, parseResult, pack, ct),
+            cancellationToken,
+            CliProfileRequest.ForNewCommand(pack.Agent, pack.Profile)).ConfigureAwait(false);
+    }
+
+    internal static async Task<int> RunAsync(
+        CliHost host,
+        ParseResult parseResult,
+        QuestionPack pack,
+        CancellationToken cancellationToken)
+    {
+        var explicitTarget = parseResult.GetValue(Output);
+        var target = explicitTarget ?? pack.Output.Path;
+        PackOutputDestination? destination = null;
+        if (target is not null)
+        {
+            try
+            {
+                destination = PackOutputDestination.Preflight(
+                    pack.BaseDirectory,
+                    target,
+                    isPackPath: explicitTarget is null,
+                    overwrite: parseResult.GetValue(Force));
+            }
+            catch (PackOutputException ex)
+            {
+                throw new CliUsageException(ex.Message);
+            }
+        }
+        using var destinationLease = destination;
 
         var resolution = await host.Resolver.ResolveAsync(pack.Agent, cancellationToken).ConfigureAwait(false);
         if (resolution.Agent is null)
@@ -104,30 +152,63 @@ internal static class PackCommand
         var progress = new Progress<PackQuestion>(q =>
             host.Output.Status($"Asking: {q.Title ?? q.Id}…"));
 
-        var result = await runner.RunAsync(
-            pack, resolution.Agent.AgentId, resolution.Agent.Title, progress, cancellationToken)
-            .ConfigureAwait(false);
+        using var sectionStream = CreateSectionSpool();
+        using var sectionWriter = new StreamWriter(
+            sectionStream,
+            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+            bufferSize: 65536,
+            leaveOpen: true);
+
+        var result = await runner.RunStreamingAsync(
+            pack,
+            resolution.Agent.AgentId,
+            resolution.Agent.Title,
+            async (outcome, ct) =>
+            {
+                await PackReportWriter.WriteSectionAsync(
+                    sectionWriter, outcome, pack, ct).ConfigureAwait(false);
+                await sectionWriter.FlushAsync(ct).ConfigureAwait(false);
+            },
+            progress,
+            cancellationToken).ConfigureAwait(false);
 
         var version = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.0.0";
-        var report = PackReportWriter.WriteMarkdown(result, version);
+        var header = PackReportWriter.WriteHeader(result, version);
+        await sectionWriter.FlushAsync(cancellationToken).ConfigureAwait(false);
+        sectionStream.Position = 0;
+        using var sectionReader = new StreamReader(
+            sectionStream,
+            Encoding.UTF8,
+            detectEncodingFromByteOrderMarks: true,
+            bufferSize: 65536,
+            leaveOpen: true);
 
-        var target = parseResult.GetValue(Output) ?? pack.Output.Path;
-        if (target is null)
+        try
         {
-            host.Output.WriteResult(report);
-        }
-        else
-        {
-            var full = System.IO.Path.GetFullPath(System.IO.Path.Combine(pack.BaseDirectory, target));
-            if (File.Exists(full) && !parseResult.GetValue(Force))
+            if (destination is null)
             {
-                throw new CliUsageException(
-                    $"{full} already exists. Pass --force to overwrite it.");
+                await host.Output.ResultWriter.WriteAsync(
+                    header.AsMemory(), cancellationToken).ConfigureAwait(false);
+                await CopyAsync(
+                    sectionReader, host.Output.ResultWriter, cancellationToken).ConfigureAwait(false);
             }
+            else
+            {
+                await destination.WriteAtomicAsync(
+                    async (writer, ct) =>
+                    {
+                        await writer.WriteAsync(header.AsMemory(), ct).ConfigureAwait(false);
+                        await CopyAsync(sectionReader, writer, ct).ConfigureAwait(false);
+                    },
+                    cancellationToken).ConfigureAwait(false);
 
-            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(full)!);
-            await File.WriteAllTextAsync(full, report, cancellationToken).ConfigureAwait(false);
-            host.Output.Error.MarkupLine($"[green]Wrote[/] {Markup.Escape(full)}");
+                host.Output.Error.MarkupLine(
+                    $"[green]Wrote[/] {Markup.Escape(destination.FullPath)}");
+            }
+        }
+        catch (IOException ex)
+        {
+            throw new CliUsageException($"Could not write the pack report: {ex.Message}");
         }
 
         if (result.AnyFailed)
@@ -138,6 +219,35 @@ internal static class PackCommand
         }
 
         return ExitCode.Success;
+    }
+
+    private static FileStream CreateSectionSpool()
+    {
+        var path = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(),
+            $"lakespeak-pack-{Guid.NewGuid():N}.tmp");
+        return new FileStream(
+            path,
+            FileMode.CreateNew,
+            FileAccess.ReadWrite,
+            FileShare.None,
+            bufferSize: 65536,
+            FileOptions.Asynchronous | FileOptions.SequentialScan | FileOptions.DeleteOnClose);
+    }
+
+    private static async Task CopyAsync(
+        TextReader reader,
+        TextWriter writer,
+        CancellationToken cancellationToken)
+    {
+        var buffer = new char[65536];
+        int read;
+        while ((read = await reader.ReadAsync(
+            buffer.AsMemory(), cancellationToken).ConfigureAwait(false)) > 0)
+        {
+            await writer.WriteAsync(
+                buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private static int Init(CliHost host, ParseResult parseResult)

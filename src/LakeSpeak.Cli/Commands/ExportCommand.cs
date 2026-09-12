@@ -1,4 +1,5 @@
 using System.CommandLine;
+using System.Text;
 using LakeSpeak.Cli.Console;
 using LakeSpeak.Configuration;
 using LakeSpeak.Rendering;
@@ -31,10 +32,17 @@ internal static class ExportCommand
         };
 
         command.SetAction((parseResult, cancellationToken) =>
-            CliHost.RunAsync(parseResult, (host, ct) => RunAsync(host, parseResult, ct), cancellationToken));
+            CliHost.RunAsync(
+                parseResult,
+                (host, ct) => RunAsync(host, parseResult, ct),
+                cancellationToken,
+                ProfileRequest()));
 
         return command;
     }
+
+    internal static CliProfileRequest ProfileRequest() =>
+        CliProfileRequest.ForLastAnswer();
 
     private static async Task<int> RunAsync(CliHost host, ParseResult parseResult, CancellationToken cancellationToken)
     {
@@ -43,7 +51,7 @@ internal static class ExportCommand
         // The pointer records which profile the conversation lives in. Without consulting it,
         // this command would resolve the profile from the flag or config default and could
         // address a different workspace than the answer came from.
-        var recent = RecentConversation.Load()
+        var recent = host.RecentConversation
             ?? throw new CliUsageException("No previous answer to export. Run `lakespeak ask` first.");
 
         if (recent.AttachmentId is null
@@ -81,12 +89,15 @@ internal static class ExportCommand
                 "Databricks returned no result for that query, even after re-running it. Ask the question again.");
         }
 
-        var csv = CsvWriter.Write(result);
         var path = parseResult.GetValue(Output);
 
         if (path is null)
         {
-            host.Output.WriteResult(csv);
+            await CsvWriter.WriteAsync(
+                host.Output.ResultWriter,
+                result,
+                cancellationToken).ConfigureAwait(false);
+            CliResultCompleteness.WarnIfIncomplete(host.Output, result);
             return ExitCode.Success;
         }
 
@@ -96,21 +107,70 @@ internal static class ExportCommand
             throw new CliUsageException($"{full} already exists. Pass --force to overwrite it.");
         }
 
-        Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-        await File.WriteAllTextAsync(full, csv, cancellationToken).ConfigureAwait(false);
+        await WriteCsvFileAtomicAsync(
+            full,
+            result,
+            parseResult.GetValue(Force),
+            cancellationToken).ConfigureAwait(false);
 
         host.Output.Error.MarkupLine(
             $"[green]Wrote[/] {Markup.Escape(full)} [dim]({Wording.Count(result.RowCount, "row")}). " +
             "It contains governed data; look after it.[/]");
 
-        if (result.IsTruncated)
-        {
-            // Loud, because an export that is quietly partial is the failure mode that matters.
-            host.Output.Warn(
-                "This result is incomplete — Databricks truncated it, or it continues beyond the " +
-                "rows this version reads. Narrow the question to export everything.");
-        }
+        CliResultCompleteness.WarnIfIncomplete(host.Output, result);
 
         return ExitCode.Success;
+    }
+
+    internal static async Task WriteCsvFileAtomicAsync(
+        string fullPath,
+        LakeSpeak.Genie.GenieQueryResult result,
+        bool overwrite,
+        CancellationToken cancellationToken)
+    {
+        var directory = Path.GetDirectoryName(fullPath)
+            ?? throw new CliUsageException($"{fullPath} has no parent directory.");
+        Directory.CreateDirectory(directory);
+
+        var temporaryPath = Path.Combine(
+            directory,
+            $".{Path.GetFileName(fullPath)}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            var stream = new FileStream(
+                temporaryPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                bufferSize: 65536,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            await using (stream.ConfigureAwait(false))
+            {
+                var writer = new StreamWriter(
+                    stream,
+                    new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+                    bufferSize: 65536);
+                await using (writer.ConfigureAwait(false))
+                {
+                    await CsvWriter.WriteAsync(writer, result, cancellationToken).ConfigureAwait(false);
+                    await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            File.Move(temporaryPath, fullPath, overwrite);
+        }
+        finally
+        {
+            try
+            {
+                File.Delete(temporaryPath);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // The intended file was never installed if the write failed. A best-effort
+                // cleanup must not hide the more useful write or cancellation error.
+            }
+        }
     }
 }

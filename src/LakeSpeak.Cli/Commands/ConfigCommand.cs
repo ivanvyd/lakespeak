@@ -1,6 +1,5 @@
 using System.CommandLine;
 using LakeSpeak.Configuration;
-using LakeSpeak.Genie.Authentication;
 using Spectre.Console;
 
 namespace LakeSpeak.Cli.Commands;
@@ -11,14 +10,14 @@ internal static class ConfigCommand
     {
         var show = new Command("show", "Show the effective configuration and where each value came from.");
         show.SetAction((parseResult, cancellationToken) =>
-            CliHost.RunAsync(parseResult, (host, ct) => Task.FromResult(Show(host, parseResult)), cancellationToken));
+            CliHost.RunAsync(parseResult, (host, ct) => Task.FromResult(Show(host)), cancellationToken));
 
         var config = new Command("config", "Inspect configuration.");
         config.Subcommands.Add(show);
         return config;
     }
 
-    private static int Show(CliHost host, ParseResult parseResult)
+    private static int Show(CliHost host)
     {
         var console = host.Output.Error;
         var path = LakeSpeakConfig.DefaultPath;
@@ -26,17 +25,14 @@ internal static class ConfigCommand
         console.MarkupLine($"Config file: [dim]{Spectre.Console.Markup.Escape(path)}[/]" +
             (File.Exists(path) ? string.Empty : " [dim](not present; defaults in use)[/]"));
 
-        var flagProfile = parseResult.GetValue(GlobalOptions.Profile);
-        var envHost = Environment.GetEnvironmentVariable("DATABRICKS_HOST");
-        var profile = flagProfile ?? host.Config.Defaults.Profile;
-
         // Naming the source of each value is the point of this command: "which profile am I
         // actually using" is otherwise guesswork across four layers.
-        console.MarkupLine($"Profile: [bold]{Escape(profile ?? "(none)")}[/] [dim]({(flagProfile is not null ? "--profile flag" : host.Config.Defaults.Profile is not null ? "config defaults.profile" : "unset")})[/]");
+        console.MarkupLine(
+            $"Profile: [bold]{Escape(host.Workspace.Profile ?? "(none)")}[/] " +
+            $"[dim]({Escape(host.Workspace.Source)})[/]");
 
-        var resolvedHost = DatabricksProfiles.ResolveHost(null, profile);
-        var hostSource = envHost is { Length: > 0 } ? "DATABRICKS_HOST" : ".databrickscfg";
-        console.MarkupLine($"Workspace: [bold]{Escape(resolvedHost?.Host ?? "(unresolved)")}[/] [dim]({hostSource})[/]");
+        console.MarkupLine(
+            $"Workspace: [bold]{Escape(host.Workspace.Host?.Host ?? "(unresolved)")}[/]");
 
         console.MarkupLine($"Output format: [bold]{host.Format}[/]");
         console.MarkupLine($"Max displayed rows: [bold]{host.Config.Display.MaxRows}[/]");

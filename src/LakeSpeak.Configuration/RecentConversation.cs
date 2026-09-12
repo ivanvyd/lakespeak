@@ -16,6 +16,12 @@ public sealed class RecentConversation
 {
     public string? Profile { get; set; }
 
+    /// <summary>
+    /// Origin of the workspace that owns the conversation. This is routing context, not a
+    /// credential; paths, queries, user information and tokens are never stored.
+    /// </summary>
+    public string? WorkspaceHost { get; set; }
+
     public string? AgentId { get; set; }
 
     public string? AgentTitle { get; set; }

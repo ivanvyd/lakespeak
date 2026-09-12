@@ -15,7 +15,7 @@ git clone https://github.com/ivanvyd/LakeSpeak.NET.git
 cd LakeSpeak.NET
 dotnet restore
 dotnet build -c Release
-dotnet test -c Release --filter "Category!=Live"
+dotnet test -c Release --filter-not-trait "Category=Live" --ignore-exit-code 8
 ```
 
 The default test run needs no Databricks workspace and no credentials. That is deliberate: a
@@ -45,7 +45,7 @@ terminology. That translation happens once, at the serialization boundary — se
 ```bash
 dotnet build -c Release            # warnings are errors
 dotnet format --verify-no-changes
-dotnet test -c Release --filter "Category!=Live"
+dotnet test -c Release --filter-not-trait "Category=Live" --ignore-exit-code 8
 ```
 
 If you added or changed a dependency, regenerate the lock files and commit them:
@@ -81,7 +81,7 @@ Tests marked `Category=Live` need a real workspace with a Genie Agent and cost r
 never run for pull requests from forks, because they require credentials. Run them yourself with:
 
 ```bash
-dotnet test -c Release --filter "Category=Live"
+dotnet test -c Release --filter-trait "Category=Live" --ignore-exit-code 8
 ```
 
 Do not point them at a production workspace.

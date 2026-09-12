@@ -47,8 +47,10 @@ your data. Both are untrusted for rendering purposes: ANSI escape sequences and 
 are stripped before anything reaches your terminal, so a crafted cell value cannot rewrite your
 screen or spoof a prompt.
 
-**Export paths are checked.** Writes outside the target directory are rejected, and an existing file
-is not overwritten without confirmation.
+**Question Pack output paths are checked before remote work.** Pack-declared paths must stay below
+the pack directory and neither pack paths nor explicit `--output` paths may traverse a symbolic
+link or junction. Reports are staged and atomically installed; an existing file is not replaced
+unless `--force` was supplied.
 
 ## What LakeSpeak does not protect against
 
@@ -80,8 +82,10 @@ Recorded in [docs/security/threat-model.md](docs/security/threat-model.md).
   effect of pushing a tag.
 - Live integration tests never run for pull requests from forks, because they need workspace
   credentials.
-- Release tags must be signed by a key in `.github/allowed_signers`; the workflow refuses to build
-  an unsigned tag, so a release cannot be triggered with GitHub access alone.
+- Every publishing run must come from a signed `v*` tag whose peeled commit equals the workflow
+  checkout and is contained in `origin/main`. Manual workflow runs can rehearse a build but cannot
+  publish. A key allowed by the current `main` branch is therefore required to authorize a new
+  release identity.
 
 ## Verifying a release
 
@@ -116,9 +120,15 @@ by itself prove the source commit.
 > the same workflow run, and their digests remain available in that release's `SHA256SUMS.txt`.
 
 The attestation answers *what built this*. **Who authorised it** is a separate question, answered
-by the release tag: the workflow verifies the tag's SSH signature against
-[`.github/allowed_signers`](.github/allowed_signers) before it builds, so a release cannot be
-started by someone holding only the GitHub account. You can check any release tag yourself:
+by the release tag: before it builds, the workflow verifies the tag's SSH signature against the
+current `main` branch's [`.github/allowed_signers`](.github/allowed_signers), checks that the peeled
+tag commit is the commit it checked out, and requires that commit to be contained in `origin/main`.
+Manual dispatches are nonpublishing rehearsals. A publishing run therefore
+cannot change the version or source commit without an allowed signing key. A GitHub account could
+re-run or replay an existing signed tag, but that remains bound to the same immutable package
+version and source. Someone able to change this workflow and merge the change could remove the
+control; the signed tag makes that a separate, reviewable repository change rather than a property
+of the GitHub account alone. You can check any release tag yourself:
 
 ```bash
 git -c gpg.ssh.allowedSignersFile=.github/allowed_signers verify-tag v0.1.0

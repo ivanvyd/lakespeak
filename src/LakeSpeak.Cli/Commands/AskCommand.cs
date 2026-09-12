@@ -1,4 +1,5 @@
 using System.CommandLine;
+using LakeSpeak.Cli.Console;
 using LakeSpeak.Configuration;
 using LakeSpeak.Genie;
 using LakeSpeak.Rendering;
@@ -27,10 +28,13 @@ internal static class AskCommand
 
         command.SetAction((parseResult, cancellationToken) =>
             CliHost.RunAsync(parseResult, (host, ct) =>
-                RunAsync(host, parseResult, ct), cancellationToken));
+                RunAsync(host, parseResult, ct), cancellationToken, ProfileRequest(parseResult)));
 
         return command;
     }
+
+    internal static CliProfileRequest ProfileRequest(ParseResult parseResult) =>
+        CliProfileRequest.ForNewCommand(parseResult.GetValue(Agent));
 
     private static async Task<int> RunAsync(CliHost host, ParseResult parseResult, CancellationToken cancellationToken)
     {
@@ -65,16 +69,14 @@ internal static class AskCommand
         var response = await host.Client.AskAsync(
             agent.AgentId,
             question,
-            new GenieAskOptions
-            {
-                IncludeQueryResult = true,
-                OnStateChanged = state => host.Output.Status(state.ToProgressDescription() + "…"),
-            },
+            host.CreateAskOptions(
+                state => host.Output.Status(state.ToProgressDescription() + "…")),
             cancellationToken).ConfigureAwait(false);
 
         new RecentConversation
         {
-            Profile = parseResult.GetValue(GlobalOptions.Profile),
+            Profile = host.Workspace.Profile,
+            WorkspaceHost = CliWorkspaceResolver.WorkspaceIdentity(host.Workspace.Host),
             AgentId = agent.AgentId,
             AgentTitle = agent.Title,
             ConversationId = response.ConversationId,
@@ -83,20 +85,40 @@ internal static class AskCommand
             UpdatedAt = host.Clock.GetUtcNow(),
         }.Save();
 
-        Write(host, response, agent, showSql);
+        await WriteAsync(
+            host.Output,
+            host.Renderer,
+            host.Format,
+            response,
+            agent,
+            showSql,
+            cancellationToken).ConfigureAwait(false);
         return ExitCode.Success;
     }
 
-    private static void Write(CliHost host, GenieResponse response, GenieAgent agent, bool showSql)
+    internal static async Task WriteAsync(
+        ConsoleOutput output,
+        TerminalRenderer renderer,
+        OutputFormat format,
+        GenieResponse response,
+        GenieAgent agent,
+        bool showSql,
+        CancellationToken cancellationToken)
     {
-        switch (host.Format)
+        switch (format)
         {
             case OutputFormat.Json:
-                host.Output.WriteResultLine(MachineOutput.ToJson(response, agent.Title));
+                var json = MachineOutput.ToJson(response, agent.Title);
+                await output.ResultWriter.WriteLineAsync(
+                    json.AsMemory(), cancellationToken).ConfigureAwait(false);
                 break;
 
             case OutputFormat.Jsonl:
-                host.Output.WriteResult(MachineOutput.ToJsonLines(response, agent.Title));
+                await MachineOutput.WriteJsonLinesAsync(
+                    output.ResultWriter,
+                    response,
+                    agent.Title,
+                    cancellationToken).ConfigureAwait(false);
                 break;
 
             case OutputFormat.Csv:
@@ -104,40 +126,47 @@ internal static class AskCommand
                 {
                     // CSV means the query result, and there is no honest way to render prose as
                     // rows. Saying so on stderr keeps stdout empty and parseable.
-                    host.Output.Warn("This answer has no query result, so there is nothing to write as CSV.");
+                    output.Warn("This answer has no query result, so there is nothing to write as CSV.");
                     break;
                 }
 
-                host.Output.WriteResult(CsvWriter.Write(response.Result));
+                await CsvWriter.WriteAsync(
+                    output.ResultWriter,
+                    response.Result,
+                    cancellationToken).ConfigureAwait(false);
                 break;
 
             case OutputFormat.Markdown:
-                host.Output.WriteResult(MarkdownWriter.Write(response, agent.Title));
+                await MarkdownWriter.WriteAsync(
+                    output.ResultWriter,
+                    response,
+                    agent.Title,
+                    cancellationToken).ConfigureAwait(false);
                 break;
 
             case OutputFormat.Table:
                 if (response.Result is not null)
                 {
-                    host.Renderer.WriteResult(response.Result);
+                    renderer.WriteResult(response.Result);
                 }
 
                 break;
 
             case OutputFormat.Text:
-                host.Renderer.WriteAnswer(response);
+                renderer.WriteAnswer(response);
                 if (response.Result is not null)
                 {
-                    host.Renderer.WriteResult(response.Result);
+                    renderer.WriteResult(response.Result);
                 }
 
                 if (showSql && response.Query?.Sql is { Length: > 0 } sql)
                 {
-                    host.Renderer.WriteSql(sql, response.Query?.Parameters);
+                    renderer.WriteSql(sql, response.Query?.Parameters);
                 }
 
                 if (response.State == GenieMessageState.QueryResultExpired)
                 {
-                    host.Output.Warn(
+                    output.Warn(
                         "The cached query result has expired, so no table is shown. The answer and SQL are still valid.");
                 }
 
@@ -148,7 +177,9 @@ internal static class AskCommand
             // reason ExitCode.From throws rather than defaulting.
             default:
                 throw new ArgumentOutOfRangeException(
-                    nameof(host), host.Format, "No renderer is wired up for this output format.");
+                    nameof(format), format, "No renderer is wired up for this output format.");
         }
+
+        CliResultCompleteness.WarnIfIncomplete(output, response.Result);
     }
 }

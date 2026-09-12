@@ -184,7 +184,7 @@ Trust the SDK in every case below.
 | Query result at `…/messages/{id}/query-result/{attachment_id}` | That is the deprecated `GetMessageQueryResultByAttachment`. Use `…/attachments/{attachment_id}/query-result`. The same split exists on execute-query. |
 | Reasoning traces live on `GenieQueryAttachments` | No such type. They are at `attachments[].query.thoughts[]`. |
 | `update-space` is POST | The SDK generates PATCH. |
-| The Conversation API is GA as of 2026-04-02 (claimed in this project's own plan) | Public Preview was announced 2025-03-11 and **no GA announcement was found** in the 2026 release notes. The README therefore does not claim GA. Visualization retrieval is explicitly Beta. |
+| The Conversation API was Public Preview | The official 2026 release notes record [general availability on 2026-04-02](https://docs.databricks.com/aws/en/ai-bi/release-notes/2026#april-2-2026). Visualization retrieval became [generally available on 2026-08-26](https://docs.databricks.com/aws/en/ai-bi/release-notes/2026#august-26-2026), although LakeSpeak still does not use or live-test that path. |
 
 ## Response envelope differences
 

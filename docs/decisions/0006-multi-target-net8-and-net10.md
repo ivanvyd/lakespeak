@@ -20,7 +20,7 @@ Two design choices were on the table:
 
 Path 1 is what was chosen. Per-TFM package versions use central package management's
 `Update`+`Condition`; the `Microsoft.Extensions.*` packages follow the .NET runtime cadence
-(net10.0 stays on `10.0.11`, net8.0 drops to `8.0.x`). The test infrastructure differs by
+(net10.0 stays on the `10.x` servicing line, net8.0 drops to `8.0.x`). The test infrastructure differs by
 TFM as documented in ADR 0005.
 
 The one place the two TFMs diverge on resilience: the unsafe-method exclusion
@@ -64,7 +64,7 @@ The mechanical parts:
    `<TargetFrameworks>net8.0;net10.0</TargetFrameworks>`.
 2. `Directory.Packages.props` — net8-line overrides for `Microsoft.Extensions.*`
    (8.0.x), `Microsoft.Extensions.Http.Resilience` (8.10.0), `Microsoft.NET.Test.Sdk`
-   (17.11.1), `coverlet.collector` (6.0.4), and `Microsoft.Extensions.TimeProvider.Testing`
+   (17.14.1), `coverlet.collector` (6.0.4), and `Microsoft.Extensions.TimeProvider.Testing`
    (8.10.0). The default versions above remain the net10.0 values.
 3. `tests/Directory.Build.props` — split the MTP shape: `UseMicrosoftTestingPlatformRunner`
    for net10, `TestingPlatformDotnetTestSupport` for net8. The `xunit.v3.mtp-v2` /

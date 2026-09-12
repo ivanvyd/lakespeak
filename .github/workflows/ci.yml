@@ -4,6 +4,9 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Refresh-lock-files dispatches this explicitly after its GITHUB_TOKEN push. GitHub suppresses
+  # the ordinary push event for that token, so the maintenance workflow needs this entry point.
+  workflow_dispatch:
 
 # Least privilege by default. Jobs needing more declare it themselves.
 permissions:
@@ -67,13 +70,18 @@ jobs:
           slnx="$([ "${{ matrix.tfm }}" = 'net8.0' ] && echo 'tests/libraries-only.slnx' || echo 'LakeSpeak.slnx')"
           dotnet format "$slnx" --verify-no-changes --no-restore
 
+      - name: Workflow policy tests
+        if: matrix.tfm == 'net10.0'
+        run: |
+          bash .github/scripts/test-release-workflow-policy.sh
+          python .github/scripts/test-maintenance-workflow-policy.py
+
       - name: Fail on vulnerable packages
         shell: bash
         run: |
           slnx="$([ "${{ matrix.tfm }}" = 'net8.0' ] && echo 'tests/libraries-only.slnx' || echo 'LakeSpeak.slnx')"
-          dotnet list "$slnx" package --vulnerable --include-transitive 2>&1 | tee vuln.txt
-          grep -q -E '>\s+\S+\s+\S+\s+\S+\s+(Moderate|High|Critical)' vuln.txt && exit 1
-          echo "no moderate-or-higher advisories"
+          python .github/scripts/test_check_nuget_vulnerabilities.py
+          python .github/scripts/check_nuget_vulnerabilities.py "$slnx"
 
       # A tool package that does not install is a broken release, and the failure
       # only appears at `dotnet tool install` time unless it is checked here.

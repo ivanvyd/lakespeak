@@ -9,10 +9,6 @@ on:
         description: 'Version to build, without the leading v (e.g. 0.1.0). Leave blank for a dev build.'
         type: string
         required: false
-      publish:
-        description: 'Publish to NuGet. Leave unticked to build, test and attest without releasing.'
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -29,50 +25,35 @@ jobs:
       id-token: write      # provenance attestation
       attestations: write
     outputs:
-      version: ${{ steps.version.outputs.version }}
+      version: ${{ steps.release_identity.outputs.version }}
+      publish_authorized: ${{ steps.release_identity.outputs.publish_authorized }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify release workflow policy
+        run: bash .github/scripts/test-release-workflow-policy.sh
 
       # The provenance attestation proves WHAT built an artifact. It cannot prove WHO authorised
       # the release: anyone able to push a tag can start this workflow, and the attestation would
       # be perfectly valid. The signing key is the one credential GitHub never holds, so requiring
-      # a signed tag is what makes a stolen GitHub account insufficient on its own.
-      - name: Require a signed tag
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          set -euo pipefail
-          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
-          git config gpg.ssh.allowedSignersFile .github/allowed_signers
-          if ! git verify-tag "${GITHUB_REF_NAME}"; then
-            echo "::error::Tag ${GITHUB_REF_NAME} is not signed by a key listed in .github/allowed_signers. See RELEASING.md."
-            exit 1
-          fi
+      # a signed tag is what makes a stolen GitHub account insufficient on its own. The verifier
+      # checks the trusted SSH signature and proves the peeled tag commit is the commit selected
+      # by actions/checkout before it emits the only value that can enable the publish job.
+      - name: Verify release identity
+        id: release_identity
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: bash .github/scripts/verify-release-identity.sh
 
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
 
-      - id: version
-        run: |
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            v="${GITHUB_REF_NAME#v}"
-          elif [ -n "${{ inputs.version }}" ]; then
-            v="${{ inputs.version }}"
-          else
-            # Placeholder for a rehearsal run. Publishing this would put a permanent
-            # 0.0.0-dev package on nuget.org, which cannot be unpublished — so refuse
-            # rather than let a ticked box and an empty field combine into a release.
-            if [ "${{ inputs.publish }}" = "true" ]; then
-              echo "::error::'publish' was ticked but 'version' is empty. Supply an explicit version to publish." >&2
-              exit 1
-            fi
-            v="0.0.0-dev.${GITHUB_RUN_NUMBER}"
-          fi
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "building $v"
-
       - run: dotnet restore --locked-mode
-      - run: dotnet build --no-restore -c Release -p:Version=${{ steps.version.outputs.version }}
+      - name: Build
+        env:
+          RELEASE_VERSION: ${{ steps.release_identity.outputs.version }}
+        run: dotnet build --no-restore -c Release -p:Version="$RELEASE_VERSION"
       # MTP filter syntax, mirroring ci.yml: --filter-not-trait is the
       # Category=Live exclusion. The previous --filter "Category!=Live" is
       # the VSTest form and is rejected as an unknown option under MTP, which
@@ -80,7 +61,9 @@ jobs:
       - run: dotnet test --no-build -c Release --filter-not-trait 'Category=Live' --ignore-exit-code 8
 
       - name: Pack
-        run: dotnet pack --no-build -c Release -p:Version=${{ steps.version.outputs.version }} -o artifacts
+        env:
+          RELEASE_VERSION: ${{ steps.release_identity.outputs.version }}
+        run: dotnet pack --no-build -c Release -p:Version="$RELEASE_VERSION" -o artifacts
 
       # Self-contained binaries for people who do not have the .NET SDK. macOS
       # is built but is listed as untested in the compatibility matrix until
@@ -91,14 +74,16 @@ jobs:
       # framework"). The CLI is net10.0-only by deliberate scope (ADR 0006),
       # so net10.0 is the only TFM that has a published binary.
       - name: Publish binaries
+        env:
+          RELEASE_VERSION: ${{ steps.release_identity.outputs.version }}
         run: |
           for rid in win-x64 linux-x64 osx-arm64; do
             dotnet publish src/LakeSpeak.Cli/LakeSpeak.Cli.csproj \
               -c Release -f net10.0 -r "$rid" --self-contained true \
-              -p:Version=${{ steps.version.outputs.version }} \
+              -p:Version="$RELEASE_VERSION" \
               -p:PublishSingleFile=true \
               -o "publish/$rid"
-            ( cd "publish/$rid" && zip -qr "../../artifacts/lakespeak-${{ steps.version.outputs.version }}-$rid.zip" . )
+            ( cd "publish/$rid" && zip -qr "../../artifacts/lakespeak-$RELEASE_VERSION-$rid.zip" . )
           done
 
       # Only over what actually reaches the release. Running this across the whole build directory
@@ -141,11 +126,9 @@ jobs:
 
   publish:
     needs: build
-    # A tag push publishes. A manual run publishes only when explicitly ticked, so the default
-    # dispatch is a safe rehearsal that builds, tests and attests without releasing anything.
-    if: >-
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    # Only a signed-tag push can make the verifier emit true. Every manual dispatch is a
+    # nonpublishing rehearsal. Retry a failed publish job within its original workflow run.
+    if: needs.build.outputs.publish_authorized == 'true'
     runs-on: ubuntu-latest
     # A protected environment turns publishing into a decision someone makes,
     # rather than a side effect of pushing a tag.
@@ -188,9 +171,9 @@ jobs:
             --source https://api.nuget.org/v3/index.json \
             --skip-duplicate
 
-      # Only a tag has a release to attach artifacts to; a manual publish has no ref to name.
-      - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
-        if: startsWith(github.ref, 'refs/tags/v')
+      # Every publication runs at the verified tag, so the release assets stay bound to the same
+      # release identity as the packages.
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: |
             artifacts/*.zip

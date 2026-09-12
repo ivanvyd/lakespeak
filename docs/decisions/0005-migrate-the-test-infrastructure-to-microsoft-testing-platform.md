@@ -34,8 +34,9 @@ bridge). Path 2 is what the .NET 10 docs steer toward and what xunit v3 supports
 `xunit.v3` 3.1.0+ ships MTP support directly, and an explicit `xunit.v3.mtp-v2` package is also
 available if a tighter pin is needed.
 
-The project uses xunit v3.3.2.2 (`xunit.v3`) and `Microsoft.NET.Test.Sdk` 18.8.1 today; both
-versions are MTP-compatible. Adopting MTP mode requires only the `global.json` flip and the
+The project uses xunit v4 with its `xunit.v3` package identity and Microsoft Testing Platform;
+the exact package versions remain centrally pinned in `Directory.Packages.props`, and the selected
+xunit and Test SDK versions are MTP-compatible. Adopting MTP mode requires only the `global.json` flip and the
 matching CLI changes — `--filter` becomes `--filter-trait`, `--logger trx` becomes
 `--report-trx` — and no package additions.
 

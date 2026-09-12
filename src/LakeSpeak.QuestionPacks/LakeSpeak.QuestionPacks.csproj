@@ -1,13 +1,19 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <PropertyGroup>
+    <!-- LibraryImport generates an unsafe marshalling stub for the Windows directory handles
+         that keep validated pack-output components from being swapped before the atomic write. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="YamlDotNet" />
-    <PackageReference Include="JsonSchema.Net" />
     <ProjectReference Include="..\LakeSpeak.Genie\LakeSpeak.Genie.csproj" />
     <ProjectReference Include="..\LakeSpeak.Rendering\LakeSpeak.Rendering.csproj" />
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="LakeSpeak.Cli" />
     <InternalsVisibleTo Include="LakeSpeak.QuestionPacks.Tests" />
   </ItemGroup>
 

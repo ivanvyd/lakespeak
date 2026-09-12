@@ -86,16 +86,27 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton(TimeProvider.System);
         services.AddTransient<GenieAuthenticationHandler>();
 
-        services.AddHttpClient<IGenieClient, GenieClient>((sp, http) =>
+        var httpClientBuilder = services.AddHttpClient<IGenieClient, GenieClient>((sp, http) =>
             {
                 var options = sp.GetRequiredService<IOptions<GenieClientOptions>>().Value;
                 http.BaseAddress = options.Host;
-                http.Timeout = options.RequestTimeout;
                 http.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgent.Value);
             })
-            .AddHttpMessageHandler<GenieAuthenticationHandler>()
-            .AddStandardResilienceHandler(resilience =>
+            .AddHttpMessageHandler<GenieAuthenticationHandler>();
+
+        var resilienceBuilder = httpClientBuilder.AddStandardResilienceHandler();
+
+        // AddStandardResilienceHandler disables HttpClient.Timeout. Reapply the matching outer
+        // deadline afterwards so ResponseContentRead buffering, which happens after a
+        // DelegatingHandler has returned the headers, is bounded too.
+        httpClientBuilder.ConfigureHttpClient((sp, http) =>
+            http.Timeout = sp.GetRequiredService<IOptions<GenieClientOptions>>()
+                .Value.RequestTimeout);
+
+        resilienceBuilder.Configure((resilience, sp) =>
             {
+                var requestTimeout = sp.GetRequiredService<IOptions<GenieClientOptions>>()
+                    .Value.RequestTimeout;
                 resilience.Retry.MaxRetryAttempts = 3;
                 resilience.Retry.UseJitter = true;
 
@@ -111,12 +122,10 @@ public static class ServiceCollectionExtensions
                 resilience.Retry.ShouldHandle = GenieRetryPolicy.ShouldRetryResilience;
 #endif
 
-                // These sit under the default 100s RequestTimeout. Nothing enforces that
-                // relationship, so a caller who lowers RequestTimeout below 30s can have a
-                // slow-but-succeeding call cancelled by the pipeline rather than by their own
-                // timeout. Not guarded today; stated here rather than implied to be safe.
-                resilience.AttemptTimeout.Timeout = TimeSpan.FromSeconds(30);
-                resilience.TotalRequestTimeout.Timeout = TimeSpan.FromMinutes(2);
+                resilience.AttemptTimeout.Timeout = requestTimeout < TimeSpan.FromSeconds(30)
+                    ? requestTimeout
+                    : TimeSpan.FromSeconds(30);
+                resilience.TotalRequestTimeout.Timeout = requestTimeout;
                 resilience.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(60);
             });
 

@@ -54,7 +54,7 @@
     <!-- 33.x requires a SponsorCheck license declaration. Keep the latest compatible release
          until the maintainer has an actual sponsorship/license to record; never claim an
          exemption or ignore the license in build configuration. -->
-    <PackageVersion Include="Verify.XunitV3" Version="32.0.1" />
+    <PackageVersion Include="Verify.XunitV3" Version="33.0.0" />
     <PackageVersion Include="WireMock.Net" Version="2.15.0" />
     <!-- FakeTimeProvider. Polling is the component most worth testing and the one
          most tempting to test with real delays; a fake clock keeps the suite fast

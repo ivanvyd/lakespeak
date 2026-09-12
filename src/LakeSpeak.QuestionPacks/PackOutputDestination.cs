@@ -81,8 +81,7 @@ internal sealed partial class PackOutputDestination : IDisposable
             ?? throw new PackOutputException($"Output path '{path}' has no parent directory.");
         var safetyRoot = isPackPath
             ? packRoot
-            : Path.GetPathRoot(target)
-                ?? throw new PackOutputException($"Output path '{path}' has no filesystem root.");
+            : FindExistingDirectory(parent, path);
 
         EnsureDirectories(safetyRoot, parent);
         RejectLinks(target, safetyRoot);
@@ -217,6 +216,19 @@ internal sealed partial class PackOutputDestination : IDisposable
         }
     }
 
+    private static string FindExistingDirectory(string path, string originalPath)
+    {
+        for (var current = path; current is not null; current = Path.GetDirectoryName(current))
+        {
+            if (Directory.Exists(current))
+            {
+                return current;
+            }
+        }
+
+        throw new PackOutputException($"Output path '{originalPath}' has no existing parent directory.");
+    }
+
     private static void RejectLinks(string target, string safetyRoot)
     {
         if (QuestionPackLoader.ContainsLink(target, safetyRoot))
@@ -234,7 +246,9 @@ internal sealed partial class PackOutputDestination : IDisposable
              current = Path.GetDirectoryName(current)!)
         {
             var info = new DirectoryInfo(current);
-            parents.Add(new DirectoryFingerprint(current, info.CreationTimeUtc));
+            parents.Add(new DirectoryFingerprint(
+                current,
+                OperatingSystem.IsWindows() ? info.CreationTimeUtc : null));
             if (PathsEqual(current, safetyRoot))
             {
                 break;
@@ -348,14 +362,16 @@ internal sealed partial class PackOutputDestination : IDisposable
         right,
         OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 
-    private sealed record DirectoryFingerprint(string Path, DateTime CreationTimeUtc);
+    private sealed record DirectoryFingerprint(string Path, DateTime? CreationTimeUtc);
 
     private static void EnsureParentsMatch(IReadOnlyList<DirectoryFingerprint> parents)
     {
         foreach (var expected in parents)
         {
             var current = new DirectoryInfo(expected.Path);
-            if (!current.Exists || current.CreationTimeUtc != expected.CreationTimeUtc)
+            if (!current.Exists
+                || (expected.CreationTimeUtc is { } expectedCreationTime
+                    && current.CreationTimeUtc != expectedCreationTime))
             {
                 throw new PackOutputException(
                     $"Output directory '{expected.Path}' changed after validation; the report was not written.");

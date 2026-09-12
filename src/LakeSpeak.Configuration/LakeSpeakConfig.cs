@@ -60,6 +60,14 @@ public sealed class LakeSpeakConfig
             var loaded = deserializer.Deserialize<LakeSpeakConfig>(File.ReadAllText(path))
                 ?? new LakeSpeakConfig();
 
+            var errors = Validate(loaded);
+            if (errors.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    $"{path} has invalid configuration:{Environment.NewLine}- " +
+                    string.Join($"{Environment.NewLine}- ", errors));
+            }
+
             // YamlDotNet constructs its own dictionary and assigns it over the field
             // initializer, discarding the OrdinalIgnoreCase comparer. Without rebuilding it,
             // an alias written `Finance:` would not match `--agent finance`, and resolution
@@ -79,6 +87,99 @@ public sealed class LakeSpeakConfig
                 $"{path} is not valid YAML (line {ex.Start.Line}): {ex.Message}", ex);
         }
     }
+
+    private static List<string> Validate(LakeSpeakConfig config)
+    {
+        var errors = new List<string>();
+
+        if (config.Version != 1)
+        {
+            errors.Add($"version must be 1 (found {config.Version}).");
+        }
+
+        if (config.Defaults is null)
+        {
+            errors.Add("defaults must be a mapping, not null.");
+        }
+        else
+        {
+            if (config.Defaults.Profile is not null
+                && string.IsNullOrWhiteSpace(config.Defaults.Profile))
+            {
+                errors.Add("defaults.profile must not be empty when specified.");
+            }
+
+            if (config.Defaults.Agent is not null
+                && string.IsNullOrWhiteSpace(config.Defaults.Agent))
+            {
+                errors.Add("defaults.agent must not be empty when specified.");
+            }
+
+            if (!SupportedOutputs.Contains(config.Defaults.Output, StringComparer.OrdinalIgnoreCase))
+            {
+                errors.Add(
+                    $"defaults.output '{config.Defaults.Output}' is not supported; use text, table, markdown, json, jsonl, or csv.");
+            }
+
+            if (!ConfigDuration.TryParse(config.Defaults.Timeout, out _))
+            {
+                errors.Add(
+                    $"defaults.timeout '{config.Defaults.Timeout}' must be a positive duration such as 90s, 5m, or 1h " +
+                    "and no longer than about 24.9 days.");
+            }
+        }
+
+        if (config.Display is null)
+        {
+            errors.Add("display must be a mapping, not null.");
+        }
+        else if (config.Display.MaxRows <= 0)
+        {
+            errors.Add("display.maxRows must be greater than zero.");
+        }
+
+        if (config.Agents is null)
+        {
+            errors.Add("agents must be a mapping, not null.");
+        }
+        else
+        {
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (name, alias) in config.Agents)
+            {
+                if (string.IsNullOrWhiteSpace(name))
+                {
+                    errors.Add("agent alias names must not be empty.");
+                }
+                else if (!names.Add(name))
+                {
+                    errors.Add($"agent alias '{name}' is duplicated with different casing.");
+                }
+
+                if (alias is null)
+                {
+                    errors.Add($"agent alias '{name}' must be a mapping, not null.");
+                    continue;
+                }
+
+                if (string.IsNullOrWhiteSpace(alias.Id))
+                {
+                    errors.Add($"agent alias '{name}' must define a non-empty id.");
+                }
+
+                if (alias.Profile is not null
+                    && string.IsNullOrWhiteSpace(alias.Profile))
+                {
+                    errors.Add($"agent alias '{name}' profile must not be empty when specified.");
+                }
+            }
+        }
+
+        return errors;
+    }
+
+    private static readonly string[] SupportedOutputs =
+        ["text", "table", "markdown", "json", "jsonl", "csv"];
 }
 
 public sealed class Defaults

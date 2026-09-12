@@ -1,6 +1,7 @@
 using System.CommandLine;
 using LakeSpeak.Configuration;
 using LakeSpeak.Genie;
+using LakeSpeak.Rendering;
 using Spectre.Console;
 
 namespace LakeSpeak.Cli.Commands;
@@ -30,10 +31,17 @@ internal static class FeedbackCommand
         };
 
         command.SetAction((parseResult, cancellationToken) =>
-            CliHost.RunAsync(parseResult, (host, ct) => RunAsync(host, parseResult, ct), cancellationToken));
+            CliHost.RunAsync(
+                parseResult,
+                (host, ct) => RunAsync(host, parseResult, ct),
+                cancellationToken,
+                ProfileRequest()));
 
         return command;
     }
+
+    internal static CliProfileRequest ProfileRequest() =>
+        CliProfileRequest.ForLastAnswer();
 
     private static async Task<int> RunAsync(CliHost host, ParseResult parseResult, CancellationToken cancellationToken)
     {
@@ -51,7 +59,7 @@ internal static class FeedbackCommand
         // The pointer records which profile the conversation lives in. Without consulting it,
         // this command would resolve the profile from the flag or config default and could
         // address a different workspace than the answer came from.
-        var recent = RecentConversation.Load()
+        var recent = host.RecentConversation
             ?? throw new CliUsageException(
                 "No previous answer to rate. Run `lakespeak ask` first.");
 
@@ -67,7 +75,7 @@ internal static class FeedbackCommand
 
         host.Output.Error.MarkupLine(
             $"[green]Feedback sent[/] for the last answer from " +
-            $"[bold]{Markup.Escape(recent.AgentTitle ?? recent.AgentId)}[/].");
+            $"[bold]{Markup.Escape(TerminalSafety.Sanitize(recent.AgentTitle ?? recent.AgentId))}[/].");
 
         return ExitCode.Success;
     }

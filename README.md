@@ -26,7 +26,7 @@ including what a Genie Agent is and how to tell whether you have one.
 
 ## Status
 
-**Current source version: v0.3.1.** The NuGet badges above show the latest published packages. See
+**Current source version: v0.3.2.** The NuGet badges above show the latest published packages. See
 [Verification status](#verification-status) for what has actually been tested and what has not.
 Nothing here is stable until `v1.0`; the CLI surface and the `LakeSpeak.Genie` public API may both
 change, and before `v1.0` a minor version is allowed to break them.
@@ -142,7 +142,7 @@ services.AddLakeSpeak(options => options.Profile = "production");
 var response = await genie.AskAsync(
     agentId: salesAgentId,
     question: "Which customers had the largest revenue decline?",
-    cancellationToken);
+    cancellationToken: cancellationToken);
 
 Console.WriteLine(response.Text);
 

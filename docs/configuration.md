@@ -60,7 +60,7 @@ Schema version, currently `1`. Present so a future change can be handled rather 
 | `profile` | none | Databricks CLI profile to use when `--profile` is not given |
 | `agent` | none | Agent to use when `--agent` is not given |
 | `output` | `text` | Output format when `--format` is not given: `text`, `table`, `markdown`, `json`, `jsonl` or `csv` |
-| `timeout` | `10m` | How long to wait for an answer before giving up, as a duration such as `90s`, `5m` |
+| `timeout` | `10m` | How long `ask` and each `chat` question wait for an answer, as a positive duration such as `90s` or `5m`; the timer limit is about 24.9 days (`596h` in whole hours) |
 
 A command-line flag always wins over a default here.
 
@@ -83,6 +83,10 @@ Agent. An alias takes precedence over an Agent title: if you alias `sales` to on
 Agent in the workspace is also titled "sales", the alias wins, because it is an explicit
 instruction and the title is a coincidence.
 
+Inside an interactive chat, `/use` can switch to another Agent in the same workspace. If an alias
+selects a different workspace, LakeSpeak asks you to leave and start a new `lakespeak chat --agent
+<alias>` session so it can rebuild the client with the right host and credentials.
+
 ### `display`
 
 | Key | Default | Meaning |
@@ -102,14 +106,21 @@ Whatever that yields is then resolved as: a configured alias, then an exact Agen
 Agent title, then a case-insensitive title match. An ambiguous name lists the candidates and exits
 rather than picking one.
 
-For the profile:
+For the profile used by a new command, highest priority first:
 
 1. `--profile` on the command line
-2. The profile the last answer came from, for `export last` and `feedback last` — so they address
-   the workspace the conversation actually lives in
-3. `defaults.profile` in this file
-4. Environment configuration: `DATABRICKS_HOST`, then `DATABRICKS_TOKEN` or the
+2. `spec.profile` in a Question Pack
+3. The selected Agent alias's `profile`
+4. `defaults.profile` in this file
+5. Environment configuration: `DATABRICKS_HOST`, then `DATABRICKS_TOKEN` or the
    `DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET` pair; otherwise `.databrickscfg`
+
+`export last` and `feedback last` are deliberately different. A successful `ask` saves the
+effective profile and normalized workspace origin alongside the conversation identifiers. Those
+two commands route back to that saved workspace even if `defaults.profile` changes later. An
+explicit `--profile` is accepted only when it resolves to the same saved workspace; otherwise the
+command exits instead of sending a conversation id to the wrong host. Pointers written by older
+LakeSpeak versions have no workspace origin and retain the old defaults/authentication fallback.
 
 ## Checking what was loaded
 

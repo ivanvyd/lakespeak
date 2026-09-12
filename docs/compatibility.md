@@ -10,12 +10,14 @@ evidence that a cloud works.
 
 | LakeSpeak | .NET | Databricks CLI | Genie API | Status |
 |---|---|---|---|---|
-| 0.3.x | 8.0, 10.0 | 1.10.0 | `/api/2.0/genie`, Public Preview | Library family multi-targets 8.0 and 10.0; the `lakespeak` CLI is 10.0-only. See [ADR 0006](decisions/0006-multi-target-net8-and-net10.md) |
-| 0.1.x — 0.2.x | 10.0 | 1.10.0 | `/api/2.0/genie`, Public Preview | Library family and CLI are 10.0-only |
+| 0.3.x | 8.0, 10.0 | 1.10.0 | `/api/2.0/genie`, GA | Library family multi-targets 8.0 and 10.0; the `lakespeak` CLI is 10.0-only. See [ADR 0006](decisions/0006-multi-target-net8-and-net10.md) |
+| 0.1.x — 0.2.x | 10.0 | 1.10.0 | `/api/2.0/genie`, preview when released | Library family and CLI are 10.0-only |
 
-The Genie Conversation API is treated as **Public Preview**. Public Preview was announced
-2025-03-11, and no GA announcement was found in the 2026 release notes; if you have a source saying
-otherwise, please open an issue. Visualization retrieval is explicitly Beta and is not used.
+The Genie Conversation API became [generally available on
+2026-04-02](https://docs.databricks.com/aws/en/ai-bi/release-notes/2026#april-2-2026). Visualization
+retrieval became [generally available on
+2026-08-26](https://docs.databricks.com/aws/en/ai-bi/release-notes/2026#august-26-2026), but LakeSpeak
+does not use that path and has not exercised it live.
 
 ## Platforms
 
@@ -57,7 +59,7 @@ Entra ID access token for resource `2ff814a6-3304-4ab8-85cb-cd0e6f879c1d`, suppl
 
 The live suite in `tests/LakeSpeak.LiveIntegrationTests` reproduces all of this. Run it with
 `DATABRICKS_HOST`, `DATABRICKS_TOKEN` and `LAKESPEAK_LIVE_AGENT` set:
-`dotnet test -c Release --filter "Category=Live"`.
+`dotnet test -c Release --filter-trait "Category=Live" --ignore-exit-code 8`.
 
 What this still does **not** exercise: the Genie full-result download endpoints and visualizations.
 Those remain covered by contract tests only.
@@ -200,16 +202,15 @@ Still not exercised live, with the reason each resists it, are the three paths l
 
 ## Live verification, AWS — through 2026-09-01
 
-Run against an AWS Databricks workspace at `dbc-7169d377-476d.cloud.databricks.com`. The initial
-2026-08-29 pass used a PAT from the maintainer's `DEFAULT` profile. The 2026-09-01 pass used
-LakeSpeak's native OAuth M2M provider with the existing `northstar-agent-demo` service principal.
-The verified agents were `Northstar Revenue Analyst`, `Student Academic Performance` and
-`Bakehouse Sales Starter Space`.
+Run against a nonproduction AWS Databricks workspace. The initial 2026-08-29 pass used a PAT from
+the maintainer's default profile. The 2026-09-01 pass used LakeSpeak's native OAuth M2M provider
+with a dedicated test service principal. The Agent names, workspace hostname, and profile names are
+omitted because they are not needed to reproduce the test shape.
 
 | Path | Result |
 |---|---|
-| `lakespeak auth check` against AWS | Profiles in `.databrickscfg`: 2 (DEFAULT → `dbc-7169d377-476d.cloud.databricks.com`). Token obtained (788 characters, not shown). Workspace answered; 3 Agents visible |
-| `lakespeak ask --agent "Northstar Revenue Analyst" "How many rows are in the data?"` | Real answer: 12 rows in `customer_dim`, 12 rows in `customer_health_view`, 24 rows in `customer_revenue_monthly`. Result table rendered with three rows of real data. |
+| `lakespeak auth check` against AWS | Profiles were discovered, a token was obtained without being printed, the workspace answered, and 3 Agents were visible |
+| `lakespeak ask` against a configured test Agent | The real response contained a three-row result over synthetic data and rendered successfully |
 | Wire shape on AWS | Identical to Azure. The PAT path works unchanged. Native OAuth M2M was verified through all 9 live tests in [main-branch GitHub Actions run 33516431819](https://github.com/ivanvyd/LakeSpeak.NET/actions/runs/33516431819). |
 | Chunk composition | A wide 1,000-row query produced four chunks. Genie advertised `next_chunk_index` but omitted its link; LakeSpeak constructed the statement chunk endpoint and returned all rows with no truncation. |
 

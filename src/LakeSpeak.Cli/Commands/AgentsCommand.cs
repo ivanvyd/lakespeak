@@ -1,5 +1,6 @@
 using System.CommandLine;
 using System.Text.Json;
+using LakeSpeak.Cli.Console;
 using LakeSpeak.Genie;
 using LakeSpeak.Rendering;
 
@@ -30,19 +31,28 @@ internal static class AgentsCommand
             agents.Add(agent);
         }
 
+        WriteListing(host.Output, host.Renderer, host.Format, agents);
+        return ExitCode.Success;
+    }
+
+    internal static void WriteListing(
+        ConsoleOutput output,
+        TerminalRenderer renderer,
+        OutputFormat format,
+        IReadOnlyList<GenieAgent> agents)
+    {
         if (agents.Count == 0)
         {
             // Not an error: an identity with no Genie grants legitimately sees nothing, and the
             // fix is a Databricks permission rather than anything this tool can do.
-            host.Output.Warn(
+            output.Warn(
                 "No Genie Agents are visible to this identity. Access is granted in Databricks.");
-            return ExitCode.Success;
         }
 
-        switch (host.Format)
+        switch (format)
         {
             case OutputFormat.Json:
-                host.Output.WriteResultLine(JsonSerializer.Serialize(
+                output.WriteResultLine(JsonSerializer.Serialize(
                     agents.Select(a => new { id = a.AgentId, title = a.Title, description = a.Description }),
                     Indented));
                 break;
@@ -50,17 +60,17 @@ internal static class AgentsCommand
             case OutputFormat.Jsonl:
                 foreach (var agent in agents)
                 {
-                    host.Output.WriteResultLine(JsonSerializer.Serialize(
+                    output.WriteResultLine(JsonSerializer.Serialize(
                         new { id = agent.AgentId, title = agent.Title }));
                 }
 
                 break;
 
             case OutputFormat.Csv:
-                host.Output.WriteResultLine("id,title");
+                output.WriteResultLine("id,title");
                 foreach (var agent in agents)
                 {
-                    host.Output.WriteResultLine($"{CsvWriter.EscapeField(agent.AgentId)},{CsvWriter.EscapeField(agent.Title)}");
+                    output.WriteResultLine($"{CsvWriter.EscapeField(agent.AgentId)},{CsvWriter.EscapeField(agent.Title)}");
                 }
 
                 break;
@@ -71,14 +81,16 @@ internal static class AgentsCommand
             case OutputFormat.Text:
             case OutputFormat.Table:
             case OutputFormat.Markdown:
-                host.Renderer.WriteAgents(agents);
+                if (agents.Count > 0)
+                {
+                    renderer.WriteAgents(agents);
+                }
+
                 break;
 
             default:
                 throw new ArgumentOutOfRangeException(
-                    nameof(host), host.Format, "No renderer is wired up for this output format.");
+                    nameof(format), format, "No renderer is wired up for this output format.");
         }
-
-        return ExitCode.Success;
     }
 }

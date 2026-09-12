@@ -27,6 +27,27 @@ public sealed record PackResult(
     public bool AnyFailed => FailureCount > 0;
 }
 
+/// <summary>An outcome without the potentially large response graph retained by <see cref="QuestionOutcome"/>.</summary>
+internal sealed record QuestionOutcomeSummary(
+    PackQuestion Question,
+    bool Succeeded,
+    string? Failure,
+    TimeSpan Duration);
+
+/// <summary>Compact result returned by the streaming pack path used by the CLI.</summary>
+internal sealed record PackRunSummary(
+    QuestionPack Pack,
+    string AgentId,
+    string? AgentTitle,
+    IReadOnlyList<QuestionOutcomeSummary> Outcomes,
+    DateTimeOffset StartedAt,
+    TimeSpan Duration)
+{
+    public int FailureCount => Outcomes.Count(o => !o.Succeeded);
+
+    public bool AnyFailed => FailureCount > 0;
+}
+
 /// <summary>
 /// Runs a pack's questions in order and collects the outcomes.
 /// </summary>
@@ -53,9 +74,50 @@ public sealed class PackRunner(IGenieClient client, TimeProvider? timeProvider =
         IProgress<PackQuestion>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        var outcomes = new List<QuestionOutcome>(pack.Questions.Count);
+        var summary = await RunCoreAsync(
+            pack,
+            agentId,
+            agentTitle,
+            (outcome, _) =>
+            {
+                outcomes.Add(outcome);
+                return ValueTask.CompletedTask;
+            },
+            progress,
+            cancellationToken).ConfigureAwait(false);
+
+        return new PackResult(
+            pack, agentId, agentTitle, outcomes, summary.StartedAt, summary.Duration);
+    }
+
+    /// <summary>
+    /// Runs questions sequentially and releases each response after the caller has emitted it.
+    /// </summary>
+    internal Task<PackRunSummary> RunStreamingAsync(
+        QuestionPack pack,
+        string agentId,
+        string? agentTitle,
+        Func<QuestionOutcome, CancellationToken, ValueTask> onOutcome,
+        IProgress<PackQuestion>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(onOutcome);
+        return RunCoreAsync(
+            pack, agentId, agentTitle, onOutcome, progress, cancellationToken);
+    }
+
+    private async Task<PackRunSummary> RunCoreAsync(
+        QuestionPack pack,
+        string agentId,
+        string? agentTitle,
+        Func<QuestionOutcome, CancellationToken, ValueTask> onOutcome,
+        IProgress<PackQuestion>? progress,
+        CancellationToken cancellationToken)
+    {
         var startedAt = _time.GetUtcNow();
         var packStart = _time.GetTimestamp();
-        var outcomes = new List<QuestionOutcome>(pack.Questions.Count);
+        var outcomes = new List<QuestionOutcomeSummary>(pack.Questions.Count);
 
         foreach (var question in pack.Questions)
         {
@@ -63,6 +125,7 @@ public sealed class PackRunner(IGenieClient client, TimeProvider? timeProvider =
             progress?.Report(question);
 
             var start = _time.GetTimestamp();
+            QuestionOutcome outcome;
             try
             {
                 var response = await client.AskAsync(
@@ -75,7 +138,8 @@ public sealed class PackRunner(IGenieClient client, TimeProvider? timeProvider =
                     },
                     cancellationToken).ConfigureAwait(false);
 
-                outcomes.Add(new QuestionOutcome(question, response, null, _time.GetElapsedTime(start)));
+                outcome = new QuestionOutcome(
+                    question, response, null, _time.GetElapsedTime(start));
             }
             catch (GenieException ex)
             {
@@ -86,11 +150,16 @@ public sealed class PackRunner(IGenieClient client, TimeProvider? timeProvider =
 
                 // The message is already scrubbed by GenieException, so it is safe to put in a
                 // report that gets committed or pasted into a ticket.
-                outcomes.Add(new QuestionOutcome(question, null, ex.Message, _time.GetElapsedTime(start)));
+                outcome = new QuestionOutcome(
+                    question, null, ex.Message, _time.GetElapsedTime(start));
             }
+
+            await onOutcome(outcome, cancellationToken).ConfigureAwait(false);
+            outcomes.Add(new QuestionOutcomeSummary(
+                question, outcome.Succeeded, outcome.Failure, outcome.Duration));
         }
 
-        return new PackResult(
+        return new PackRunSummary(
             pack, agentId, agentTitle, outcomes, startedAt, _time.GetElapsedTime(packStart));
     }
 }
@@ -107,9 +176,94 @@ public static class PackReportWriter
 {
     public static string WriteMarkdown(PackResult result, string toolVersion)
     {
-        var builder = new StringBuilder();
-        var pack = result.Pack;
+        var builder = new StringBuilder(WriteHeader(
+            result.Pack,
+            result.AgentId,
+            result.AgentTitle,
+            result.StartedAt,
+            result.FailureCount,
+            result.Outcomes.Count,
+            toolVersion));
 
+        using var writer = new StringWriter(builder, CultureInfo.InvariantCulture);
+        foreach (var outcome in result.Outcomes)
+        {
+            WriteSection(writer, outcome, result.Pack);
+        }
+
+        return builder.ToString();
+    }
+
+    /// <summary>Writes the bounded report preamble after all outcome statuses are known.</summary>
+    internal static string WriteHeader(PackRunSummary result, string toolVersion) => WriteHeader(
+        result.Pack,
+        result.AgentId,
+        result.AgentTitle,
+        result.StartedAt,
+        result.FailureCount,
+        result.Outcomes.Count,
+        toolVersion);
+
+    /// <summary>Writes one completed section without retaining its rendered rows.</summary>
+    internal static async Task WriteSectionAsync(
+        TextWriter writer,
+        QuestionOutcome outcome,
+        QuestionPack pack,
+        CancellationToken cancellationToken)
+    {
+        var heading = outcome.Question.Title ?? outcome.Question.Id;
+        await writer.WriteLineAsync(
+            $"<a id=\"{outcome.Question.Id}\"></a>".AsMemory(), cancellationToken).ConfigureAwait(false);
+        await writer.WriteLineAsync(
+            $"## {TerminalSafety.Sanitize(heading)}".AsMemory(), cancellationToken).ConfigureAwait(false);
+        await writer.WriteLineAsync(ReadOnlyMemory<char>.Empty, cancellationToken).ConfigureAwait(false);
+
+        if (!outcome.Succeeded)
+        {
+            await writer.WriteLineAsync(
+                $"**This question failed.** {TerminalSafety.Sanitize(outcome.Failure)}".AsMemory(),
+                cancellationToken).ConfigureAwait(false);
+            await writer.WriteLineAsync(ReadOnlyMemory<char>.Empty, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var response = outcome.Response!;
+        if (!string.IsNullOrWhiteSpace(response.Text))
+        {
+            await writer.WriteLineAsync(
+                TerminalSafety.Sanitize(response.Text).AsMemory(), cancellationToken).ConfigureAwait(false);
+            await writer.WriteLineAsync(ReadOnlyMemory<char>.Empty, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (response.Result is { Columns.Count: > 0 } table)
+        {
+            await MarkdownWriter.WriteTableAsync(writer, table, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (pack.Behavior.IncludeGeneratedSql && response.Query is { Sql.Length: > 0 } query)
+        {
+            await MarkdownWriter.WriteSqlAsync(writer, query, cancellationToken).ConfigureAwait(false);
+        }
+
+        var notes = Notes(outcome, pack, response);
+        if (notes.Count > 0)
+        {
+            await writer.WriteLineAsync(
+                $"_{string.Join(" · ", notes)}_".AsMemory(), cancellationToken).ConfigureAwait(false);
+            await writer.WriteLineAsync(ReadOnlyMemory<char>.Empty, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static string WriteHeader(
+        QuestionPack pack,
+        string agentId,
+        string? agentTitle,
+        DateTimeOffset startedAt,
+        int failureCount,
+        int outcomeCount,
+        string toolVersion)
+    {
+        var builder = new StringBuilder();
         builder.AppendLine(CultureInfo.InvariantCulture, $"# {Title(pack)}")
             .AppendLine();
 
@@ -119,17 +273,18 @@ public static class PackReportWriter
         }
 
         builder.AppendLine(CultureInfo.InvariantCulture,
-                $"Generated: {result.StartedAt.UtcDateTime:yyyy-MM-dd HH:mm} UTC")
-            .AppendLine(CultureInfo.InvariantCulture, $"Agent: {result.AgentTitle ?? result.AgentId}")
+                $"Generated: {startedAt.UtcDateTime:yyyy-MM-dd HH:mm} UTC")
+            .AppendLine(CultureInfo.InvariantCulture,
+                $"Agent: {TerminalSafety.Sanitize(agentTitle ?? agentId)}")
             .AppendLine(CultureInfo.InvariantCulture, $"LakeSpeak: {toolVersion}")
             .AppendLine();
 
-        if (result.AnyFailed)
+        if (failureCount > 0)
         {
             // Stated at the top, not buried after the answers that did work. A report whose
             // failures are only visible at the bottom gets read as complete.
             builder.AppendLine(CultureInfo.InvariantCulture,
-                    $"> **{result.FailureCount} of {result.Outcomes.Count} questions failed.** Sections below say which, and why.")
+                    $"> **{failureCount} of {outcomeCount} questions failed.** Sections below say which, and why.")
                 .AppendLine();
         }
 
@@ -138,25 +293,20 @@ public static class PackReportWriter
                 "acting on anything consequential.")
             .AppendLine();
 
-        foreach (var outcome in result.Outcomes)
-        {
-            WriteSection(builder, outcome, pack);
-        }
-
         return builder.ToString();
     }
 
-    private static void WriteSection(StringBuilder builder, QuestionOutcome outcome, QuestionPack pack)
+    private static void WriteSection(TextWriter writer, QuestionOutcome outcome, QuestionPack pack)
     {
         var heading = outcome.Question.Title ?? outcome.Question.Id;
-        builder.AppendLine(CultureInfo.InvariantCulture, $"## {TerminalSafety.Sanitize(heading)}")
-            .AppendLine();
+        writer.WriteLine($"<a id=\"{outcome.Question.Id}\"></a>");
+        writer.WriteLine($"## {TerminalSafety.Sanitize(heading)}");
+        writer.WriteLine();
 
         if (!outcome.Succeeded)
         {
-            builder.AppendLine(CultureInfo.InvariantCulture,
-                    $"**This question failed.** {TerminalSafety.Sanitize(outcome.Failure)}")
-                .AppendLine();
+            writer.WriteLine($"**This question failed.** {TerminalSafety.Sanitize(outcome.Failure)}");
+            writer.WriteLine();
             return;
         }
 
@@ -164,7 +314,8 @@ public static class PackReportWriter
 
         if (!string.IsNullOrWhiteSpace(response.Text))
         {
-            builder.AppendLine(TerminalSafety.Sanitize(response.Text)).AppendLine();
+            writer.WriteLine(TerminalSafety.Sanitize(response.Text));
+            writer.WriteLine();
         }
 
         if (response.Result is { Columns.Count: > 0 } table)
@@ -172,37 +323,40 @@ public static class PackReportWriter
             // The canonical renderer, not a copy. A second implementation had already drifted:
             // this report omitted the row counts that `ask --format markdown` states, so the
             // same data made two different claims about how complete it was.
-            MarkdownWriter.WriteTable(builder, table);
+            MarkdownWriter.WriteTable(writer, table);
         }
 
-        if (pack.Behavior.IncludeGeneratedSql && response.Query?.Sql is { Length: > 0 } sql)
+        if (pack.Behavior.IncludeGeneratedSql && response.Query is { Sql.Length: > 0 } query)
         {
-            builder.AppendLine("<details><summary>Generated SQL</summary>")
-                .AppendLine()
-                .AppendLine("```sql")
-                .AppendLine(TerminalSafety.Sanitize(sql))
-                .AppendLine("```")
-                .AppendLine()
-                .AppendLine("</details>")
-                .AppendLine();
+            MarkdownWriter.WriteSql(writer, query);
         }
 
+        var notes = Notes(outcome, pack, response);
+        if (notes.Count > 0)
+        {
+            writer.WriteLine($"_{string.Join(" · ", notes)}_");
+            writer.WriteLine();
+        }
+    }
+
+    private static List<string> Notes(
+        QuestionOutcome outcome,
+        QuestionPack pack,
+        GenieResponse response)
+    {
         var notes = new List<string>();
         if (pack.Behavior.IncludeTimings)
         {
-            notes.Add($"{outcome.Duration.TotalSeconds:F1}s");
+            notes.Add(outcome.Duration.TotalSeconds.ToString("F1", CultureInfo.InvariantCulture) + "s");
         }
 
         if (pack.Behavior.IncludeIdentifiers)
         {
-            notes.Add($"conversation `{response.ConversationId}`");
-            notes.Add($"message `{response.MessageId}`");
+            notes.Add($"conversation `{TerminalSafety.Sanitize(response.ConversationId)}`");
+            notes.Add($"message `{TerminalSafety.Sanitize(response.MessageId)}`");
         }
 
-        if (notes.Count > 0)
-        {
-            builder.AppendLine(CultureInfo.InvariantCulture, $"_{string.Join(" · ", notes)}_").AppendLine();
-        }
+        return notes;
     }
 
     private static string Title(QuestionPack pack) =>

@@ -15,8 +15,10 @@ information at the terminal.
 Results go to **stdout**; progress, warnings and errors go to **stderr**. That split is what lets
 `lakespeak ask --format json … 2>/dev/null` produce clean JSON for a script.
 
-Colour and progress are suppressed automatically when output is redirected, when `NO_COLOR` is
-set, or when the format is machine-readable.
+ANSI decoration is suppressed when output is redirected, when `NO_COLOR` is set, or when the
+format is machine-readable. `NO_COLOR` does not make a real terminal noninteractive: `chat` still
+prompts and progress remains plain text. Use `--quiet` to suppress progress; machine-readable
+formats suppress it automatically.
 
 ## `lakespeak agents list`
 
@@ -28,7 +30,9 @@ lakespeak agents list --format json
 ```
 
 An identity with no Genie grants sees nothing. That is reported as a warning with exit `0`, not as
-an error — the fix is a Databricks permission, not a change to how you invoked the command.
+an error — the fix is a Databricks permission, not a change to how you invoked the command. Machine
+output remains parseable: JSON emits `[]`, CSV emits its header, and JSONL emits zero rows; the
+explanation stays on stderr.
 
 ## `lakespeak ask <question>`
 
@@ -51,6 +55,15 @@ Agent looks exactly like success.
 
 With `--format csv`, the *query result* is written. A narrative answer has no rows, so if the
 response carries no result you get a warning on stderr and nothing on stdout.
+
+When a returned result is incomplete, every output format emits a warning on stderr without
+contaminating machine-readable stdout. JSONL also refuses duplicate column names or a row wider
+than its schema, because a JSON object cannot preserve either shape without losing data; use JSON
+or CSV for those results.
+
+CSV writes SQL `NULL` as an unquoted empty field and a literal empty string as `""`. To prevent
+spreadsheet formula execution, a value beginning with `=`, `+`, `-`, or `@` is visibly prefixed
+with a single quote.
 
 ## `lakespeak chat`
 
@@ -122,6 +135,9 @@ warehouse time, which is the right trade here because you explicitly asked to ex
 
 If the result is incomplete — truncated by Databricks, or continuing beyond the rows this version
 reads — the command says so on stderr. It never writes a partial export silently.
+File exports are staged beside the destination and installed atomically. Cancellation or a write
+failure leaves an existing complete CSV unchanged; without `--force`, a concurrently created file
+also wins rather than being overwritten.
 
 ## `lakespeak feedback [last] --rating <r>`
 
@@ -141,7 +157,8 @@ Databricks rejects a comment alongside a `none` rating. LakeSpeak refuses that c
 sending, exiting `2`, rather than surfacing an HTTP 400 that reads like a transport fault.
 
 Both commands read a pointer file written by the last `ask`. It records identifiers only — Agent,
-conversation, message and attachment ids — and never a question, an answer, or a row.
+conversation, message and attachment ids — plus the effective profile and normalized workspace
+origin used for routing. It never records a question, an answer, a token, or a row.
 
 ## `lakespeak auth check`
 

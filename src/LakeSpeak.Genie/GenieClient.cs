@@ -7,6 +7,8 @@ using System.Text.Json;
 using LakeSpeak.Genie.Wire;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Polly.CircuitBreaker;
+using Polly.Timeout;
 
 namespace LakeSpeak.Genie;
 
@@ -165,70 +167,100 @@ public sealed partial class GenieClient : IGenieClient
     {
         options ??= new GenieAskOptions();
         var timeout = options.Timeout ?? _options.PollingTimeout;
+        GenieClientOptions.ValidateWaitTimeout(timeout, nameof(options.Timeout));
         var started = _time.GetTimestamp();
         var interval = _options.InitialPollInterval;
         var polls = 0;
         GenieMessageState? lastState = null;
         GenieResponse? last = null;
 
-        while (true)
+        using var deadlineCancellation = new CancellationTokenSource(timeout, _time);
+        using var pollingCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            deadlineCancellation.Token);
+
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var elapsed = _time.GetElapsedTime(started);
-            if (elapsed > timeout)
+            while (true)
             {
-                throw new GenieException(
-                    GenieFailureKind.PollingTimeout,
-                    $"Genie did not finish within {timeout.TotalSeconds:F0}s (last state: {lastState?.ToString() ?? "none"}). " +
-                    "The question may still complete; it can be re-read with its message id.",
-                    lastKnownResponse: last);
-            }
+                cancellationToken.ThrowIfCancellationRequested();
 
-            var wire = await GetAsync<MessageWire>(
-                $"{Root}/{Esc(agentId)}/conversations/{Esc(conversationId)}/messages/{Esc(messageId)}",
-                cancellationToken).ConfigureAwait(false);
-
-            polls++;
-            last = Normalize(wire, agentId, conversationId, messageId, _time.GetElapsedTime(started), polls);
-
-            if (last.State != lastState)
-            {
-                lastState = last.State;
-                options.OnStateChanged?.Invoke(last.State);
-                LogStateChanged(_logger, messageId, last.State);
-            }
-
-            if (last.State.IsTerminal())
-            {
-                return last.State switch
+                var elapsed = _time.GetElapsedTime(started);
+                if (elapsed >= timeout)
                 {
-                    GenieMessageState.Failed => throw new GenieException(
-                        GenieFailureKind.MessageFailed,
-                        wire.Error?.Error is { Length: > 0 } e
-                            ? $"Genie could not answer: {e}"
-                            : "Genie could not answer the question.",
-                        errorCode: wire.Error?.Type,
-                        lastKnownResponse: last),
+                    throw PollingTimedOut(timeout, lastState, last);
+                }
 
-                    GenieMessageState.Cancelled => throw new GenieException(
-                        GenieFailureKind.MessageCancelled,
-                        "The Genie message was cancelled.",
-                        lastKnownResponse: last),
+                var wire = await GetAsync<MessageWire>(
+                    $"{Root}/{Esc(agentId)}/conversations/{Esc(conversationId)}/messages/{Esc(messageId)}",
+                    pollingCancellation.Token).ConfigureAwait(false);
 
-                    _ => last,
-                };
+                polls++;
+                last = Normalize(wire, agentId, conversationId, messageId, _time.GetElapsedTime(started), polls);
+
+                // A handler can complete after cancellation was requested, so the clock remains
+                // authoritative even when the transport returns a terminal response.
+                elapsed = _time.GetElapsedTime(started);
+                if (elapsed >= timeout)
+                {
+                    throw PollingTimedOut(timeout, last.State, last);
+                }
+
+                if (last.State != lastState)
+                {
+                    lastState = last.State;
+                    options.OnStateChanged?.Invoke(last.State);
+                    LogStateChanged(_logger, messageId, last.State);
+                }
+
+                if (last.State.IsTerminal())
+                {
+                    return last.State switch
+                    {
+                        GenieMessageState.Failed => throw new GenieException(
+                            GenieFailureKind.MessageFailed,
+                            wire.Error?.Error is { Length: > 0 } e
+                                ? $"Genie could not answer: {e}"
+                                : "Genie could not answer the question.",
+                            errorCode: wire.Error?.Type,
+                            lastKnownResponse: last),
+
+                        GenieMessageState.Cancelled => throw new GenieException(
+                            GenieFailureKind.MessageCancelled,
+                            "The Genie message was cancelled.",
+                            lastKnownResponse: last),
+
+                        _ => last,
+                    };
+                }
+
+                var remaining = timeout - elapsed;
+                var delay = interval <= remaining ? interval : remaining;
+                await Task.Delay(delay, _time, pollingCancellation.Token).ConfigureAwait(false);
+
+                // Back off gently. Genie questions are usually seconds, occasionally minutes; a
+                // fixed 1s interval is wasteful for the long tail and a fixed 5s makes the common
+                // case feel sluggish.
+                interval = TimeSpan.FromMilliseconds(
+                    Math.Min(interval.TotalMilliseconds * 1.5, _options.MaxPollInterval.TotalMilliseconds));
             }
-
-            await Task.Delay(interval, _time, cancellationToken).ConfigureAwait(false);
-
-            // Back off gently. Genie questions are usually seconds, occasionally minutes; a
-            // fixed 1s interval is wasteful for the long tail and a fixed 5s makes the common
-            // case feel sluggish.
-            interval = TimeSpan.FromMilliseconds(
-                Math.Min(interval.TotalMilliseconds * 1.5, _options.MaxPollInterval.TotalMilliseconds));
+        }
+        catch (OperationCanceledException) when (
+            deadlineCancellation.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            throw PollingTimedOut(timeout, lastState, last);
         }
     }
+
+    private static GenieException PollingTimedOut(
+        TimeSpan timeout,
+        GenieMessageState? lastState,
+        GenieResponse? last) =>
+        new(
+            GenieFailureKind.PollingTimeout,
+            $"Genie did not finish within {timeout.TotalSeconds:F0}s (last state: {lastState?.ToString() ?? "none"}). " +
+            "The question may still complete; it can be re-read with its message id.",
+            lastKnownResponse: last);
 
     public Task<GenieQueryResult?> GetQueryResultAsync(
         string agentId, string conversationId, string messageId, string attachmentId,
@@ -327,6 +359,7 @@ public sealed partial class GenieClient : IGenieClient
         GenieAskOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        ValidateAskOptions(options);
         var (conversation, messageId) =
             await StartConversationAsync(agentId, question, cancellationToken).ConfigureAwait(false);
 
@@ -341,6 +374,7 @@ public sealed partial class GenieClient : IGenieClient
         GenieAskOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        ValidateAskOptions(options);
         var messageId = await SendMessageAsync(agentId, conversationId, question, cancellationToken)
             .ConfigureAwait(false);
 
@@ -375,6 +409,14 @@ public sealed partial class GenieClient : IGenieClient
             .ConfigureAwait(false);
 
         return response with { Result = result };
+    }
+
+    private static void ValidateAskOptions(GenieAskOptions? options)
+    {
+        if (options?.Timeout is { } timeout)
+        {
+            GenieClientOptions.ValidateWaitTimeout(timeout, nameof(options.Timeout));
+        }
     }
 
     private async Task<GenieQueryResult?> FetchQueryResultAsync(
@@ -670,6 +712,20 @@ public sealed partial class GenieClient : IGenieClient
         try
         {
             response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (TimeoutRejectedException ex)
+        {
+            throw new GenieException(
+                GenieFailureKind.Network,
+                "The request to Databricks exceeded the configured resilience timeout.",
+                innerException: ex);
+        }
+        catch (BrokenCircuitException ex)
+        {
+            throw new GenieException(
+                GenieFailureKind.Network,
+                "Requests to Databricks are temporarily paused after repeated transient failures.",
+                innerException: ex);
         }
         catch (HttpRequestException ex)
         {

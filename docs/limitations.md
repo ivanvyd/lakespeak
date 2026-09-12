@@ -29,10 +29,11 @@ Phrase pack questions to be unambiguous, and read reports rather than trusting t
 
 ## It cannot see more than you can
 
-Every request carries your identity, and Unity Catalog decides what that identity sees. There is no
-service-account mode and no impersonation, so LakeSpeak cannot widen your access — and cannot
-narrow it either. If you can see more than you expected, that is a workspace governance question
-rather than a LakeSpeak one.
+Every request carries the selected caller identity, and Unity Catalog decides what that identity
+sees. Interactive use can run as a user; unattended use can run as a service principal through
+OAuth M2M. LakeSpeak cannot impersonate another identity or widen either identity's access. If the
+caller can see more than expected, that is a workspace governance question rather than a LakeSpeak
+one.
 
 ## Conversation state lives in Databricks
 
@@ -40,12 +41,14 @@ There is no local conversation database. History therefore survives across machi
 subject to whatever retention Databricks applies. LakeSpeak stores only a pointer: profile, Agent
 id, conversation id.
 
-## The API is Public Preview
+## LakeSpeak remains pre-1.0
 
-Fields can appear and statuses can be added. The client tolerates that — an unrecognised status maps
-to `Unknown` and is treated as non-terminal rather than throwing — but a large enough change will
-still break it. [`planning/genie-api-surface.md`](planning/genie-api-surface.md) records which parts
-of the contract are verified and which are not.
+The Genie Conversation API became [generally available on
+2026-04-02](https://docs.databricks.com/aws/en/ai-bi/release-notes/2026#april-2-2026), but LakeSpeak's
+own public API has not reached 1.0. Service fields and statuses can still evolve. The client maps an
+unrecognised status to `Unknown` and treats it as non-terminal rather than throwing, but a larger
+contract change can still break it. [`planning/genie-api-surface.md`](planning/genie-api-surface.md)
+records which paths have evidence and which do not.
 
 ## Authentication depends on the workload
 
@@ -85,7 +88,7 @@ The truncation flag itself was wrong until a post-ship review caught it: the cli
 `manifest.truncated`, which reports statement-level truncation by Databricks and is `false` for a
 merely-chunked result. A large result was returned as its first chunk labelled complete.
 
-## Not implemented in v0.1
+## Not implemented
 
 Visualization rendering, conversation list and resume commands, and an MCP server mode. See
 [ROADMAP.md](../ROADMAP.md) for what is planned and [GOVERNANCE.md](../GOVERNANCE.md) for what is

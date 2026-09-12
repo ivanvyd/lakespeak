@@ -3,6 +3,16 @@ namespace LakeSpeak.Genie;
 /// <summary>Configuration for <see cref="IGenieClient"/>.</summary>
 public sealed class GenieClientOptions
 {
+    // CancellationTokenSource is the narrowest bound among the timer-backed polling operations.
+    // Reject unsupported values while configuration is still actionable.
+    internal static readonly TimeSpan MaximumTimerDuration =
+        TimeSpan.FromMilliseconds(int.MaxValue);
+
+    // Polly's timeout strategy requires a value strictly inside this range. RequestTimeout owns
+    // the resilience pipeline's total deadline, so accept exactly the values that pipeline can use.
+    internal static readonly TimeSpan MinimumRequestTimeout = TimeSpan.FromMilliseconds(10);
+    internal static readonly TimeSpan MaximumRequestTimeout = TimeSpan.FromHours(24);
+
     /// <summary>Workspace base URL, for example <c>https://example.azuredatabricks.net</c>.</summary>
     public Uri? Host { get; set; }
 
@@ -63,6 +73,11 @@ public sealed class GenieClientOptions
                 $"Databricks host must be an absolute https URL. Got: {Host}");
         }
 
+        ValidatePositiveDuration(PollingTimeout, nameof(PollingTimeout));
+        ValidatePositiveDuration(InitialPollInterval, nameof(InitialPollInterval));
+        ValidatePositiveDuration(MaxPollInterval, nameof(MaxPollInterval));
+        ValidateRequestTimeout(RequestTimeout);
+
         if (InitialPollInterval > MaxPollInterval)
         {
             throw new InvalidOperationException(
@@ -75,5 +90,43 @@ public sealed class GenieClientOptions
             // as a broken workspace rather than a misconfiguration.
             throw new InvalidOperationException("MaxResultRows must be at least 1.");
         }
+
+        if (PageSize < 1)
+        {
+            throw new InvalidOperationException("PageSize must be at least 1.");
+        }
     }
+
+    internal static void ValidateWaitTimeout(TimeSpan timeout, string parameterName)
+    {
+        if (!IsSupportedDuration(timeout))
+        {
+            throw new ArgumentOutOfRangeException(
+                parameterName,
+                timeout,
+                $"The timeout must be positive and no greater than {MaximumTimerDuration}.");
+        }
+    }
+
+    private static void ValidatePositiveDuration(TimeSpan value, string propertyName)
+    {
+        if (!IsSupportedDuration(value))
+        {
+            throw new InvalidOperationException(
+                $"{propertyName} must be positive and no greater than {MaximumTimerDuration}.");
+        }
+    }
+
+    private static void ValidateRequestTimeout(TimeSpan value)
+    {
+        if (value <= MinimumRequestTimeout || value >= MaximumRequestTimeout)
+        {
+            throw new InvalidOperationException(
+                $"{nameof(RequestTimeout)} must be greater than {MinimumRequestTimeout} " +
+                $"and less than {MaximumRequestTimeout}.");
+        }
+    }
+
+    private static bool IsSupportedDuration(TimeSpan value) =>
+        value > TimeSpan.Zero && value <= MaximumTimerDuration;
 }

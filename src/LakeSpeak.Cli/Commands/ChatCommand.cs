@@ -19,10 +19,17 @@ internal static class ChatCommand
         };
 
         command.SetAction((parseResult, cancellationToken) =>
-            CliHost.RunAsync(parseResult, (host, ct) => RunAsync(host, parseResult, ct), cancellationToken));
+            CliHost.RunAsync(
+                parseResult,
+                (host, ct) => RunAsync(host, parseResult, ct),
+                cancellationToken,
+                ProfileRequest(parseResult)));
 
         return command;
     }
+
+    internal static CliProfileRequest ProfileRequest(ParseResult parseResult) =>
+        CliProfileRequest.ForNewCommand(parseResult.GetValue(Agent));
 
     private static async Task<int> RunAsync(CliHost host, ParseResult parseResult, CancellationToken cancellationToken)
     {
@@ -75,16 +82,41 @@ internal static class ChatCommand
         }
 
         // The selector is why nobody has to paste an Agent id to start talking.
-        var choice = host.Output.Error.Prompt(
-            new SelectionPrompt<string>()
-                .Title("Select a Genie Agent:")
-                .PageSize(15)
-                .MoreChoicesText("[dim](move to see more)[/]")
-                .AddChoices(agents.Select(a => a.Title)));
+        var choices = BuildAgentChoices(agents);
+        var choice = host.Output.Error.Prompt(CreateAgentPrompt(choices));
 
-        return agents.First(a => a.Title == choice);
+        return choice.Agent;
     }
+
+    internal static IReadOnlyList<AgentChoice> BuildAgentChoices(IReadOnlyList<GenieAgent> agents)
+    {
+        var duplicateTitles = agents
+            .GroupBy(agent => agent.Title, StringComparer.Ordinal)
+            .Where(group => group.Count() > 1)
+            .Select(group => group.Key)
+            .ToHashSet(StringComparer.Ordinal);
+
+        return agents.Select(agent =>
+        {
+            var title = Markup.Escape(TerminalSafety.Sanitize(agent.Title));
+            var label = duplicateTitles.Contains(agent.Title)
+                ? $"{title} [dim]({Markup.Escape(TerminalSafety.Sanitize(agent.AgentId))})[/]"
+                : title;
+            return new AgentChoice(agent, label);
+        }).ToList();
+    }
+
+    internal static SelectionPrompt<AgentChoice> CreateAgentPrompt(
+        IEnumerable<AgentChoice> choices) =>
+        new SelectionPrompt<AgentChoice>()
+            .Title("Select a Genie Agent:")
+            .PageSize(15)
+            .MoreChoicesText("[dim](move to see more)[/]")
+            .UseConverter(item => item.Label)
+            .AddChoices(choices);
 }
+
+internal sealed record AgentChoice(GenieAgent Agent, string Label);
 
 /// <summary>The interactive loop: prompt, ask, render, repeat.</summary>
 internal sealed class ChatSession(CliHost host, GenieAgent agent)
@@ -97,7 +129,8 @@ internal sealed class ChatSession(CliHost host, GenieAgent agent)
     {
         var console = host.Output.Error;
         console.MarkupLine($"[bold]LakeSpeak.NET[/] [dim]— independent, not a Databricks product[/]");
-        console.MarkupLine($"Agent: [bold]{Markup.Escape(_agent.Title)}[/]");
+        console.MarkupLine(
+            $"Agent: [bold]{Markup.Escape(TerminalSafety.Sanitize(_agent.Title))}[/]");
         console.MarkupLine("[dim]Type /help for commands, /exit to leave.[/]");
         console.WriteLine();
 
@@ -142,11 +175,8 @@ internal sealed class ChatSession(CliHost host, GenieAgent agent)
         System.Console.CancelKeyPress += handler;
         try
         {
-            var options = new GenieAskOptions
-            {
-                IncludeQueryResult = true,
-                OnStateChanged = state => console.MarkupLine($"[dim]{state.ToProgressDescription()}…[/]"),
-            };
+            var options = host.CreateAskOptions(
+                state => console.MarkupLine($"[dim]{state.ToProgressDescription()}…[/]"));
 
             _last = _conversationId is null
                 ? await AskNewAsync(question, options, perQuestion.Token).ConfigureAwait(false)
@@ -188,6 +218,8 @@ internal sealed class ChatSession(CliHost host, GenieAgent agent)
         {
             host.Renderer.WriteResult(response.Result);
         }
+
+        CliResultCompleteness.WarnIfIncomplete(host.Output, response.Result);
 
         var hints = new List<string>();
         if (response.Query?.Sql is { Length: > 0 })
@@ -266,7 +298,7 @@ internal sealed class ChatSession(CliHost host, GenieAgent agent)
                 return false;
 
             case "/export":
-                Export(argument);
+                await ExportAsync(argument, cancellationToken).ConfigureAwait(false);
                 return false;
 
             case "/thumbs-up":
@@ -320,6 +352,14 @@ internal sealed class ChatSession(CliHost host, GenieAgent agent)
             return;
         }
 
+        if (RequiresWorkspaceSwitch(host, name))
+        {
+            host.Output.Warn(
+                "That Agent alias belongs to another workspace. Leave this chat and start a new " +
+                "`lakespeak chat --agent <alias>` session so LakeSpeak can rebuild the authenticated client.");
+            return;
+        }
+
         var resolution = await host.Resolver.ResolveAsync(name, cancellationToken).ConfigureAwait(false);
         if (resolution.Agent is null)
         {
@@ -334,10 +374,16 @@ internal sealed class ChatSession(CliHost host, GenieAgent agent)
         // and carrying the id across would address a conversation the new Agent does not own.
         _conversationId = null;
         _last = null;
-        host.Output.Error.MarkupLine($"Now talking to [bold]{Markup.Escape(_agent.Title)}[/].");
+        host.Output.Error.MarkupLine(
+            $"Now talking to [bold]{Markup.Escape(TerminalSafety.Sanitize(_agent.Title))}[/].");
     }
 
-    private void Export(string? path)
+    internal static bool RequiresWorkspaceSwitch(CliHost host, string agentName) =>
+        !CliWorkspaceResolver.IsSameWorkspace(
+            host.Workspace,
+            host.ResolveWorkspaceForAgentSwitch(agentName));
+
+    private async Task ExportAsync(string? path, CancellationToken cancellationToken)
     {
         if (_last?.Result is not { } result)
         {
@@ -358,10 +404,15 @@ internal sealed class ChatSession(CliHost host, GenieAgent agent)
             return;
         }
 
-        File.WriteAllText(full, CsvWriter.Write(result));
+        await ExportCommand.WriteCsvFileAtomicAsync(
+            full,
+            result,
+            overwrite: true,
+            cancellationToken).ConfigureAwait(false);
         host.Output.Error.MarkupLine(
             $"[green]Wrote[/] {Markup.Escape(full)} [dim]({Wording.Count(result.RowCount, "row")}). " +
             "It contains governed data; look after it.[/]");
+        CliResultCompleteness.WarnIfIncomplete(host.Output, result);
     }
 
     private async Task FeedbackAsync(GenieFeedbackRating rating, string? comment, CancellationToken cancellationToken)

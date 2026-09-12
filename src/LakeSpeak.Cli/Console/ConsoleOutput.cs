@@ -24,36 +24,67 @@ public sealed class ConsoleOutput
     /// output can be asserted without spawning a process.
     /// </param>
     public ConsoleOutput(OutputFormat format, bool quiet = false, TextWriter? stdout = null)
+        : this(
+            format,
+            quiet,
+            stdout ?? System.Console.Out,
+            System.Console.Error,
+            System.Console.IsOutputRedirected,
+            System.Console.IsInputRedirected,
+            Environment.GetEnvironmentVariable("NO_COLOR") is { Length: > 0 })
+    {
+    }
+
+    internal ConsoleOutput(
+        OutputFormat format,
+        bool quiet,
+        TextWriter stdout,
+        TextWriter stderr,
+        bool outputRedirected,
+        bool inputRedirected,
+        bool noColor)
     {
         _format = format;
-        _stdout = stdout ?? System.Console.Out;
+        _stdout = stdout;
         Quiet = quiet;
 
-        var redirected = System.Console.IsOutputRedirected;
-        var noColor = Environment.GetEnvironmentVariable("NO_COLOR") is { Length: > 0 };
-
-        IsInteractive = !redirected
-            && !noColor
-            && !format.IsMachineReadable()
-            && !System.Console.IsInputRedirected;
+        var capabilities = DetermineCapabilities(
+            format, outputRedirected, inputRedirected, noColor);
+        IsInteractive = capabilities.IsInteractive;
+        UsesDecoration = capabilities.UsesDecoration;
 
         Error = AnsiConsole.Create(new AnsiConsoleSettings
         {
-            Out = new AnsiConsoleOutput(System.Console.Error),
-            Ansi = IsInteractive ? AnsiSupport.Detect : AnsiSupport.No,
-            ColorSystem = IsInteractive ? ColorSystemSupport.Detect : ColorSystemSupport.NoColors,
+            Out = new AnsiConsoleOutput(stderr),
+            Ansi = UsesDecoration ? AnsiSupport.Detect : AnsiSupport.No,
+            ColorSystem = UsesDecoration ? ColorSystemSupport.Detect : ColorSystemSupport.NoColors,
         });
 
         Out = AnsiConsole.Create(new AnsiConsoleSettings
         {
-            Out = new AnsiConsoleOutput(System.Console.Out),
-            Ansi = IsInteractive ? AnsiSupport.Detect : AnsiSupport.No,
-            ColorSystem = IsInteractive ? ColorSystemSupport.Detect : ColorSystemSupport.NoColors,
+            Out = new AnsiConsoleOutput(stdout),
+            Ansi = UsesDecoration ? AnsiSupport.Detect : AnsiSupport.No,
+            ColorSystem = UsesDecoration ? ColorSystemSupport.Detect : ColorSystemSupport.NoColors,
         });
     }
 
-    /// <summary>Whether progress, colour and prompts are allowed.</summary>
+    internal static ConsoleCapabilities DetermineCapabilities(
+        OutputFormat format,
+        bool outputRedirected,
+        bool inputRedirected,
+        bool noColor)
+    {
+        var interactive = !outputRedirected
+            && !format.IsMachineReadable()
+            && !inputRedirected;
+
+        return new ConsoleCapabilities(interactive, interactive && !noColor);
+    }
+
+    /// <summary>Whether prompts can safely read from and write to a terminal.</summary>
     public bool IsInteractive { get; }
+
+    internal bool UsesDecoration { get; }
 
     public bool Quiet { get; }
 
@@ -62,6 +93,9 @@ public sealed class ConsoleOutput
 
     /// <summary>Diagnostics, progress and errors.</summary>
     public IAnsiConsole Error { get; }
+
+    /// <summary>The undecorated stdout writer used by incremental renderers.</summary>
+    internal TextWriter ResultWriter => _stdout;
 
     /// <summary>Writes raw text to stdout with no markup interpretation.</summary>
     public void WriteResult(string text) => _stdout.Write(text);
@@ -82,3 +116,5 @@ public sealed class ConsoleOutput
     public void Fail(string message) =>
         Error.MarkupLine($"[red]error:[/] {Markup.Escape(TerminalSafety.Sanitize(message))}");
 }
+
+internal readonly record struct ConsoleCapabilities(bool IsInteractive, bool UsesDecoration);

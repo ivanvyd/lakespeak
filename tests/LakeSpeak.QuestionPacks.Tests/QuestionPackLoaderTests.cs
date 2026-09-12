@@ -224,6 +224,130 @@ public class QuestionPackLoaderTests
     }
 
     [Fact]
+    public void Rejects_a_blank_profile()
+    {
+        var yaml = Valid.Replace(
+            "  agent: platform-operations",
+            "  agent: platform-operations\n  profile: '   '",
+            StringComparison.Ordinal);
+
+        var ex = Should.Throw<PackValidationException>(() => QuestionPackLoader.Parse(yaml, "/packs"));
+
+        ex.Errors.ShouldContain(e => e.Contains("spec.profile", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Rejects_an_unparseable_pack_timeout_and_reports_other_errors()
+    {
+        var yaml = Valid
+            .Replace("name: daily-brief", "name: Bad_Name", StringComparison.Ordinal)
+            .Replace("timeout: 5m", "timeout: soon", StringComparison.Ordinal);
+
+        var ex = Should.Throw<PackValidationException>(() => QuestionPackLoader.Parse(yaml, "/packs"));
+
+        ex.Errors.ShouldContain(e => e.Contains("metadata.name", StringComparison.Ordinal));
+        ex.Errors.ShouldContain(e => e.Contains("behavior.timeout", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("0s")]
+    [InlineData("01s")]
+    [InlineData("''")]
+    [InlineData("597h")]
+    [InlineData("99999999999999999999h")]
+    public void Rejects_a_non_positive_or_unrepresentable_duration(string timeout)
+    {
+        var yaml = Valid.Replace("timeout: 90s", $"timeout: {timeout}", StringComparison.Ordinal);
+
+        var ex = Should.Throw<PackValidationException>(() => QuestionPackLoader.Parse(yaml, "/packs"));
+
+        ex.Errors.ShouldContain(e => e.Contains("timeout", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Rejects_an_unsupported_pack_timeout_before_execution()
+    {
+        var yaml = Valid.Replace("timeout: 5m", "timeout: 597h", StringComparison.Ordinal);
+
+        var ex = Should.Throw<PackValidationException>(() => QuestionPackLoader.Parse(yaml, "/packs"));
+
+        ex.Errors.ShouldContain(e => e.Contains("behavior.timeout", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Rejects_a_blank_output_path()
+    {
+        var yaml = Valid.Replace(
+            "path: reports/daily.md",
+            "path: '   '",
+            StringComparison.Ordinal);
+
+        var ex = Should.Throw<PackValidationException>(() => QuestionPackLoader.Parse(yaml, "/packs"));
+
+        ex.Errors.ShouldContain(e => e.Contains("spec.output.path", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Rejects_a_null_question_node()
+    {
+        var yaml = Valid.Replace(
+            "    - id: failed-jobs\n      title: Failed jobs\n      ask: Which production jobs failed in the last 24 hours?\n      timeout: 90s",
+            "    - null",
+            StringComparison.Ordinal);
+
+        var ex = Should.Throw<PackValidationException>(() => QuestionPackLoader.Parse(yaml, "/packs"));
+
+        ex.Errors.ShouldContain(e => e.Contains("question 1", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Enforces_published_text_limits()
+    {
+        var yaml = Valid
+            .Replace("A daily summary", new string('d', 501), StringComparison.Ordinal)
+            .Replace("Failed jobs", new string('t', 201), StringComparison.Ordinal)
+            .Replace("Which production jobs failed in the last 24 hours?", new string('a', 4001), StringComparison.Ordinal);
+
+        var ex = Should.Throw<PackValidationException>(() => QuestionPackLoader.Parse(yaml, "/packs"));
+
+        ex.Errors.ShouldContain(e => e.Contains("description", StringComparison.Ordinal));
+        ex.Errors.ShouldContain(e => e.Contains("title", StringComparison.Ordinal));
+        ex.Errors.ShouldContain(e => e.Contains("ask", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Accepts_published_text_limit_boundaries()
+    {
+        var yaml = Valid
+            .Replace("A daily summary", new string('d', 500), StringComparison.Ordinal)
+            .Replace("Failed jobs", new string('t', 200), StringComparison.Ordinal)
+            .Replace("Which production jobs failed in the last 24 hours?", new string('a', 4000), StringComparison.Ordinal);
+
+        var pack = QuestionPackLoader.Parse(yaml, "/packs");
+
+        pack.Description!.Length.ShouldBe(500);
+        pack.Questions.Single().Title!.Length.ShouldBe(200);
+        pack.Questions.Single().Ask.Length.ShouldBe(4000);
+    }
+
+    [Fact]
+    public void Text_limits_count_unicode_code_points_like_the_published_schema()
+    {
+        var fourThousandEmoji = string.Concat(Enumerable.Repeat("🙂", 4000));
+        var yaml = Valid.Replace(
+            "Which production jobs failed in the last 24 hours?",
+            fourThousandEmoji,
+            StringComparison.Ordinal);
+
+        var pack = QuestionPackLoader.Parse(yaml, "/packs");
+
+        pack.Questions.Single().Ask.ShouldBe(fourThousandEmoji);
+
+        var tooLong = yaml.Replace(fourThousandEmoji, fourThousandEmoji + "🙂", StringComparison.Ordinal);
+        Should.Throw<PackValidationException>(() => QuestionPackLoader.Parse(tooLong, "/packs"));
+    }
+
+    [Fact]
     public void Rejects_an_unknown_key()
     {
         // Arrange — an unknown key is far more likely a typo in a real key than a deliberate

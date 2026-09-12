@@ -33,10 +33,13 @@
         "agent": {
           "type": "string",
           "minLength": 1,
+          "pattern": ".*\\S.*",
           "description": "Agent id, exact title, or an alias configured locally. Required and never inferred: a report that silently ran against a different Agent is worse than one that failed."
         },
         "profile": {
           "type": "string",
+          "minLength": 1,
+          "pattern": ".*\\S.*",
           "description": "Databricks CLI profile. A profile name only; never a credential."
         },
         "questions": {
@@ -55,11 +58,16 @@
                 "description": "Stable identifier. Used as the anchor in generated reports, so renaming it breaks existing links."
               },
               "title": { "type": "string", "maxLength": 200 },
-              "ask": { "type": "string", "minLength": 1, "maxLength": 4000 },
+              "ask": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4000,
+                "pattern": ".*\\S.*"
+              },
               "timeout": {
                 "type": "string",
-                "pattern": "^[0-9]+[smh]$",
-                "description": "Per-question wait, for example 90s or 5m. Falls back to the pack default."
+                "pattern": "^[1-9][0-9]*[smh]$",
+                "description": "Positive per-question wait, for example 90s or 5m. Falls back to the pack default."
               }
             }
           }
@@ -74,6 +82,8 @@
             },
             "path": {
               "type": "string",
+              "minLength": 1,
+              "pattern": ".*\\S.*",
               "description": "Written relative to the pack file. Absolute paths and parent-directory traversal are rejected at load time."
             }
           }
@@ -94,7 +104,12 @@
               "default": false,
               "description": "Record conversation and message ids in the report so an answer can be traced back in Databricks. Off by default because those ids identify a conversation containing governed data."
             },
-            "timeout": { "type": "string", "pattern": "^[0-9]+[smh]$", "default": "10m" }
+            "timeout": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*[smh]$",
+              "default": "10m",
+              "description": "Positive default wait for questions without their own timeout."
+            }
           }
         }
       }

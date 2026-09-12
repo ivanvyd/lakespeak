@@ -66,6 +66,9 @@ public sealed class GenieException : Exception
     /// retryable: retrying a 403 burns quota to produce the same 403.
     /// </summary>
     public bool IsRetryable => Kind is GenieFailureKind.RateLimited or GenieFailureKind.Network;
+
+    /// <summary>Formats this exception and its retained cause without exposing credential-shaped data.</summary>
+    public override string ToString() => DiagnosticRedaction.Scrub(base.ToString());
 }
 
 /// <summary>

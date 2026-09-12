@@ -46,7 +46,7 @@
   <PropertyGroup>
     <!-- 0.x means the API may break on a minor bump, which the README states rather than
          leaving people to discover. CI overrides this from the release tag. -->
-    <VersionPrefix>0.3.1</VersionPrefix>
+    <VersionPrefix>0.3.2</VersionPrefix>
   </PropertyGroup>
 
   <PropertyGroup>

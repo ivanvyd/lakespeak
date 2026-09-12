@@ -85,9 +85,17 @@ values are prefixed with a single quote on export — visibly, not silently.
 
 *A pack writes its report outside its own directory.*
 
-Output paths are resolved against the pack's directory and rejected if they escape it or are
-absolute. A pack can arrive in a pull request, so `../../.ssh/authorized_keys` is a realistic input
-rather than a hypothetical.
+Output paths are resolved against the pack's directory and rejected if they escape it, are
+absolute, or traverse a symbolic link or junction. The command prepares the destination before it
+starts warehouse work, keeps verified parent directories in place on Windows, rechecks them at the
+write boundary on every platform, stages a complete sibling file, and atomically installs it. A
+pack can arrive in a pull request, so `../../.ssh/authorized_keys` and a link supplied in the same
+change are realistic inputs rather than hypotheticals.
+
+Portable managed APIs do not provide a no-follow rename rooted at an already-open directory handle
+on every supported Unix filesystem. A same-user process that can replace an ordinary parent during
+the final rename system call remains outside this guarantee. A link or changed directory observed
+at either managed boundary fails closed.
 
 ### T7 — Governed data leaking through artifacts
 

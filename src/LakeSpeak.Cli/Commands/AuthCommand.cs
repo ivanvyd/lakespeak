@@ -1,6 +1,5 @@
 using System.CommandLine;
 using LakeSpeak.Cli.Console;
-using LakeSpeak.Configuration;
 using LakeSpeak.Genie.Authentication;
 using Spectre.Console;
 
@@ -12,16 +11,15 @@ internal static class AuthCommand
     {
         var check = new Command("check", "Verify that credentials and the workspace host resolve.");
         check.SetAction((parseResult, cancellationToken) =>
-            CliHost.RunAsync(parseResult, (host, ct) => CheckAsync(host, parseResult, ct), cancellationToken));
+            CliHost.RunAsync(parseResult, CheckAsync, cancellationToken));
 
         var auth = new Command("auth", "Inspect authentication.");
         auth.Subcommands.Add(check);
         return auth;
     }
 
-    private static async Task<int> CheckAsync(CliHost host, ParseResult parseResult, CancellationToken cancellationToken)
+    private static async Task<int> CheckAsync(CliHost host, CancellationToken cancellationToken)
     {
-        var profile = parseResult.GetValue(GlobalOptions.Profile) ?? host.Config.Defaults.Profile;
         var profiles = DatabricksProfiles.Load();
 
         host.Output.Error.MarkupLine($"Profiles in .databrickscfg: [bold]{profiles.Count}[/]");

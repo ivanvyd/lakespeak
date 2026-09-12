@@ -23,18 +23,21 @@ means, and the README says so rather than leaving people to discover it.
 
 The version comes from one place per situation:
 
-- **A tag** `v1.2.3` → version `1.2.3`.
-- **A manual run** with the `version` input → that value.
-- **A manual run with no input** → `0.0.0-dev.<run number>`, which is never published.
+- **A signed release-tag run** at `v1.2.3` → version `1.2.3`.
+- **A manual branch rehearsal** with the `version` input → that value, after SemVer validation.
+- **A manual branch rehearsal with no input** → `0.0.0-dev.<run number>`.
+
+Manual runs never publish. A manual rehearsal run at a release tag derives its version from that
+tag and rejects a conflicting `version` input.
 
 `VersionPrefix` in `Directory.Build.props` is the local-development default only. CI overrides it.
 
 ## Rehearse first
 
-The release workflow is manually runnable, and by default it does **not** publish. Use that.
+The release workflow is manually runnable, and manual runs do **not** publish. Use that.
 
 1. Actions → **Release** → *Run workflow*.
-2. Leave **publish** unticked. Optionally set **version** to the version you intend to cut.
+2. Optionally set **version** to the version you intend to cut.
 3. Run it.
 
 That builds, runs the full non-live test suite, packs, publishes the three self-contained
@@ -55,7 +58,10 @@ release is cheap.
 ## Signed tags
 
 The release workflow verifies the tag's signature before it builds anything, against the public
-keys in [`.github/allowed_signers`](.github/allowed_signers).
+keys in the current `main` branch's [`.github/allowed_signers`](.github/allowed_signers). It also
+peels the annotated tag, requires that commit to equal the checked-out commit, and requires the tag
+commit to be contained in `origin/main`. Only a signed `v*` tag **push** can authorize the publish
+job; manually dispatched runs remain rehearsals, including runs dispatched at a tag.
 
 This exists because the provenance attestation answers a different question than people assume. It
 proves **what** built an artifact — this workflow, this repository, this commit. It cannot prove
@@ -182,13 +188,20 @@ recreating it under the same name, and publishing as if nothing changed.
    there for approval — otherwise it publishes straight away.
 6. Check the GitHub release: three binaries, checksums, SBOM, generated notes.
 
-### Publishing without a tag
+### Retry a failed publication
 
-A manual run with **publish** ticked will push to NuGet. It exists for the case where a tag has
-already been pushed and the publish job failed for an environmental reason — a NuGet outage, an
-expired key — and you want to retry without inventing a new version.
+Do not start a manual run. Open the original tag-triggered workflow run and choose **Re-run failed
+jobs**, or use:
 
-It does not create a GitHub release, because a manual run has no tag to attach one to.
+```bash
+gh run rerun <run-id> --failed
+```
+
+GitHub documents that a re-run keeps the original event's `GITHUB_SHA` and `GITHUB_REF`, so the
+retry remains bound to the same signed tag and commit. The successful build job's artifacts are
+reused by the retried publish job; no replacement version or tag is supplied. Re-runs are available
+for 30 days after the initial run. See [Re-running workflows and
+jobs](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs).
 
 ## If something goes wrong
 

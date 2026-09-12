@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
@@ -48,6 +49,10 @@ public sealed class PackValidationException(IReadOnlyList<string> errors)
 public static partial class QuestionPackLoader
 {
     private const int MaxQuestions = 50;
+    private const int MaxDescriptionLength = 500;
+    private const int MaxQuestionTitleLength = 200;
+    private const int MaxQuestionLength = 4000;
+    private static readonly TimeSpan MaximumTimeout = TimeSpan.FromMilliseconds(int.MaxValue);
 
     /// <summary>The apiVersion every pack should declare. The domain is the project's own.</summary>
     public const string CurrentApiVersion = "lakespeak.net/v1alpha1";
@@ -63,7 +68,7 @@ public static partial class QuestionPackLoader
     [GeneratedRegex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", RegexOptions.None, matchTimeoutMilliseconds: 1000)]
     private static partial Regex SafeName();
 
-    [GeneratedRegex(@"^(\d+)([smh])$", RegexOptions.None, matchTimeoutMilliseconds: 1000)]
+    [GeneratedRegex(@"^([1-9][0-9]*)([smh])$", RegexOptions.None, matchTimeoutMilliseconds: 1000)]
     private static partial Regex Duration();
 
     public static QuestionPack Load(string path)
@@ -117,9 +122,20 @@ public static partial class QuestionPackLoader
             errors.Add($"metadata.name '{name}' must be lowercase kebab-case");
         }
 
+        if (raw.Metadata?.Description is { } description
+            && ExceedsLength(description, MaxDescriptionLength))
+        {
+            errors.Add($"metadata.description must be at most {MaxDescriptionLength} characters");
+        }
+
         if (string.IsNullOrWhiteSpace(raw.Spec?.Agent))
         {
             errors.Add("spec.agent is required; a pack must say which Agent it runs against");
+        }
+
+        if (raw.Spec?.Profile is not null && string.IsNullOrWhiteSpace(raw.Spec.Profile))
+        {
+            errors.Add("spec.profile must not be empty when specified");
         }
 
         var questions = new List<PackQuestion>();
@@ -136,35 +152,63 @@ public static partial class QuestionPackLoader
                 errors.Add($"spec.questions has {rawQuestions.Count} entries; the maximum is {MaxQuestions}");
             }
 
-            foreach (var q in rawQuestions)
+            for (var index = 0; index < rawQuestions.Count; index++)
             {
-                if (string.IsNullOrWhiteSpace(q.Id) || !SafeName().IsMatch(q.Id))
+                var q = rawQuestions[index];
+                if (q is null)
                 {
-                    errors.Add($"question id '{q.Id}' must be lowercase kebab-case");
+                    errors.Add($"question {index + 1} must be an object, not null");
                     continue;
                 }
 
-                if (!seenIds.Add(q.Id))
+                var questionErrors = errors.Count;
+                var id = q.Id;
+                var questionLabel = string.IsNullOrWhiteSpace(id)
+                    ? (index + 1).ToString(CultureInfo.InvariantCulture)
+                    : id;
+                if (string.IsNullOrWhiteSpace(id) || !SafeName().IsMatch(id))
+                {
+                    errors.Add($"question id '{id}' must be lowercase kebab-case");
+                }
+                else if (!seenIds.Add(id))
                 {
                     // Duplicate ids would collide as report anchors and make results ambiguous.
-                    errors.Add($"duplicate question id '{q.Id}'");
-                    continue;
+                    errors.Add($"duplicate question id '{id}'");
                 }
 
                 if (string.IsNullOrWhiteSpace(q.Ask))
                 {
-                    errors.Add($"question '{q.Id}' has an empty ask");
-                    continue;
+                    errors.Add($"question '{questionLabel}' has an empty ask");
+                }
+                else if (ExceedsLength(q.Ask, MaxQuestionLength))
+                {
+                    errors.Add($"question '{questionLabel}' ask must be at most {MaxQuestionLength} characters");
                 }
 
-                questions.Add(new PackQuestion(q.Id, q.Title, q.Ask.Trim(), ParseDuration(q.Timeout, errors, q.Id)));
+                if (q.Title is { } title && ExceedsLength(title, MaxQuestionTitleLength))
+                {
+                    errors.Add($"question '{questionLabel}' title must be at most {MaxQuestionTitleLength} characters");
+                }
+
+                var timeout = ParseDuration(q.Timeout, errors, $"question '{questionLabel}' timeout");
+                if (errors.Count == questionErrors)
+                {
+                    questions.Add(new PackQuestion(id!, q.Title, q.Ask!.Trim(), timeout));
+                }
             }
         }
 
         var outputPath = raw.Spec?.Output?.Path;
-        if (outputPath is { Length: > 0 })
+        if (outputPath is not null)
         {
-            ValidateOutputPath(outputPath, baseDirectory, errors);
+            if (string.IsNullOrWhiteSpace(outputPath))
+            {
+                errors.Add("spec.output.path must not be empty when specified");
+            }
+            else
+            {
+                ValidateOutputPath(outputPath, baseDirectory, errors);
+            }
         }
 
         var format = raw.Spec?.Output?.Format ?? "markdown";
@@ -176,16 +220,19 @@ public static partial class QuestionPackLoader
             errors.Add($"spec.output.format must be 'markdown' (found '{format}'). JSON reports are not implemented.");
         }
 
+        var behavior = raw.Spec?.Behavior;
+        var behaviorTimeout = ParseDuration(behavior?.Timeout, errors, "behavior.timeout")
+            ?? TimeSpan.FromMinutes(10);
+
         if (errors.Count > 0)
         {
             throw new PackValidationException(errors);
         }
 
-        var behavior = raw.Spec!.Behavior;
         return new QuestionPack(
             name!,
             raw.Metadata?.Description,
-            raw.Spec.Agent!,
+            raw.Spec!.Agent!,
             raw.Spec.Profile,
             questions,
             new PackOutput(format, outputPath),
@@ -194,7 +241,7 @@ public static partial class QuestionPackLoader
                 behavior?.IncludeGeneratedSql ?? false,
                 behavior?.IncludeTimings ?? true,
                 behavior?.IncludeIdentifiers ?? false,
-                ParseDuration(behavior?.Timeout, errors, "behavior") ?? TimeSpan.FromMinutes(10)))
+                behaviorTimeout))
         {
             BaseDirectory = baseDirectory,
         };
@@ -215,12 +262,30 @@ public static partial class QuestionPackLoader
             return;
         }
 
-        var root = Path.GetFullPath(baseDirectory);
-        var target = Path.GetFullPath(Path.Combine(root, path));
+        string root;
+        string target;
+        try
+        {
+            root = Path.GetFullPath(baseDirectory);
+            target = Path.GetFullPath(Path.Combine(root, path));
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            errors.Add($"spec.output.path '{path}' is not a valid path: {ex.Message}");
+            return;
+        }
 
         if (!IsInside(target, root))
         {
             errors.Add($"spec.output.path '{path}' resolves outside the pack directory");
+            return;
+        }
+
+        if (string.Equals(target, root, OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal))
+        {
+            errors.Add($"spec.output.path '{path}' must name a file inside the pack directory");
             return;
         }
 
@@ -229,34 +294,49 @@ public static partial class QuestionPackLoader
         // junction. `link/report.md` then passes every string comparison while the write follows
         // the reparse point and lands anywhere the attacker chose — traversal without a single
         // `..`. Each component between the root and the target is therefore resolved.
-        if (FollowsALink(target, root))
+        if (ContainsLink(target, root))
         {
             errors.Add(
                 $"spec.output.path '{path}' passes through a symbolic link or junction, so its " +
-                "real destination is outside the pack directory");
+                "destination cannot be verified safely");
         }
     }
 
-    private static bool IsInside(string target, string root) =>
-        target.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal)
-        || string.Equals(target, root, StringComparison.Ordinal);
-
-    private static bool FollowsALink(string target, string root)
+    internal static bool IsInside(string target, string root)
     {
-        for (var current = Path.GetDirectoryName(target);
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        var prefix = Path.EndsInDirectorySeparator(root)
+            ? root
+            : root + Path.DirectorySeparatorChar;
+        return target.StartsWith(prefix, comparison)
+            || string.Equals(target, root, comparison);
+    }
+
+    internal static bool ContainsLink(string target, string root)
+    {
+        for (var current = target;
              current is not null && current.Length >= root.Length;
              current = Path.GetDirectoryName(current))
         {
-            var info = new DirectoryInfo(current);
-            if (!info.Exists)
+            FileSystemInfo info = Directory.Exists(current)
+                ? new DirectoryInfo(current)
+                : new FileInfo(current);
+            try
             {
-                continue;
+                if (info.LinkTarget is not null
+                    || (info.Exists && info.Attributes.HasFlag(FileAttributes.ReparsePoint)))
+                {
+                    return true;
+                }
             }
-
-            // ResolveLinkTarget returns null for an ordinary directory, so a non-null answer
-            // means this component redirects somewhere. Re-check where it actually lands.
-            if (info.ResolveLinkTarget(returnFinalTarget: true) is { } resolved
-                && !IsInside(Path.GetFullPath(resolved.FullName), root))
+            catch (IOException)
+            {
+                // An unreadable or dangling component cannot be established as an ordinary path.
+                return true;
+            }
+            catch (UnauthorizedAccessException)
             {
                 return true;
             }
@@ -267,8 +347,14 @@ public static partial class QuestionPackLoader
 
     private static TimeSpan? ParseDuration(string? value, List<string> errors, string context)
     {
+        if (value is null)
+        {
+            return null;
+        }
+
         if (string.IsNullOrWhiteSpace(value))
         {
+            errors.Add($"{context}: the duration must not be empty when specified");
             return null;
         }
 
@@ -279,15 +365,35 @@ public static partial class QuestionPackLoader
             return null;
         }
 
-        var amount = int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture);
-        return match.Groups[2].Value switch
+        if (!ulong.TryParse(match.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var amount)
+            || amount == 0)
         {
-            "s" => TimeSpan.FromSeconds(amount),
-            "m" => TimeSpan.FromMinutes(amount),
-            "h" => TimeSpan.FromHours(amount),
-            _ => null,
+            errors.Add($"{context}: '{value}' must be a positive duration that fits in TimeSpan");
+            return null;
+        }
+
+        var ticksPerUnit = match.Groups[2].Value switch
+        {
+            "s" => (ulong)TimeSpan.TicksPerSecond,
+            "m" => (ulong)TimeSpan.TicksPerMinute,
+            "h" => (ulong)TimeSpan.TicksPerHour,
+            _ => 0UL,
         };
+        if (ticksPerUnit == 0
+            || amount > (ulong)long.MaxValue / ticksPerUnit
+            || amount * ticksPerUnit > (ulong)MaximumTimeout.Ticks)
+        {
+            errors.Add(
+                $"{context}: '{value}' is too large; the maximum supported timeout is " +
+                "about 24.9 days");
+            return null;
+        }
+
+        return new TimeSpan((long)(amount * ticksPerUnit));
     }
+
+    private static bool ExceedsLength(string value, int maximum) =>
+        value.EnumerateRunes().Take(maximum + 1).Count() > maximum;
 
     // Deserialization shapes. Separate from the validated model so a half-valid file never
     // reaches the runner.
@@ -309,7 +415,7 @@ public static partial class QuestionPackLoader
     {
         public string? Agent { get; set; }
         public string? Profile { get; set; }
-        public List<RawQuestion>? Questions { get; set; }
+        public List<RawQuestion?>? Questions { get; set; }
         public RawOutput? Output { get; set; }
         public RawBehavior? Behavior { get; set; }
     }

@@ -42,6 +42,10 @@ secrets.json
 *.snupkg
 .packages/
 
+# Python maintenance scripts
+__pycache__/
+*.py[cod]
+
 # OS
 .DS_Store
 Thumbs.db

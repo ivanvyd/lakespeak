@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using LakeSpeak.Genie;
@@ -30,6 +31,9 @@ public static class MachineOutput
         WriteIndented = false,
     };
 
+    private static readonly JavaScriptEncoder RowJsonEncoder =
+        JavaScriptEncoder.UnsafeRelaxedJsonEscaping;
+
     public static string ToJson(GenieResponse response, string? agentTitle = null, bool indented = true) =>
         JsonSerializer.Serialize(
             Envelope.From(response, agentTitle),
@@ -45,28 +49,143 @@ public static class MachineOutput
     /// </remarks>
     public static string ToJsonLines(GenieResponse response, string? agentTitle = null)
     {
-        var builder = new StringBuilder();
+        using var writer = new StringWriter(CultureInfo.InvariantCulture);
+        WriteJsonLines(writer, response, agentTitle);
+        return writer.ToString();
+    }
+
+    /// <summary>Writes JSONL incrementally, retaining at most one encoded row at a time.</summary>
+    /// <remarks>
+    /// JSON objects cannot represent duplicate property names losslessly. Duplicate columns and
+    /// rows wider than their schema are therefore rejected before anything is written. Short rows
+    /// remain representable: properties for cells that were not returned are omitted.
+    /// </remarks>
+    public static void WriteJsonLines(
+        TextWriter writer,
+        GenieResponse response,
+        string? agentTitle = null)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        ArgumentNullException.ThrowIfNull(response);
 
         if (response.Result is null)
         {
-            builder.AppendLine(JsonSerializer.Serialize(
+            writer.WriteLine(JsonSerializer.Serialize(
                 Envelope.From(response, agentTitle), CompactOptions));
-            return builder.ToString();
+            return;
         }
 
-        var columns = response.Result.Columns;
+        ValidateRowObjectShape(response.Result);
+        var rowBuffer = new StringBuilder();
+        using var rowWriter = new StringWriter(rowBuffer, CultureInfo.InvariantCulture);
         foreach (var row in response.Result.Rows)
         {
-            var obj = new Dictionary<string, string?>(columns.Count, StringComparer.Ordinal);
-            for (var i = 0; i < columns.Count && i < row.Count; i++)
-            {
-                obj[columns[i].Name] = row[i];
-            }
+            BuildRow(rowBuffer, rowWriter, response.Result.Columns, row);
+            WriteLine(writer, rowBuffer);
+        }
+    }
 
-            builder.AppendLine(JsonSerializer.Serialize(obj, CompactOptions));
+    /// <summary>Writes JSONL asynchronously, retaining at most one encoded row at a time.</summary>
+    public static async Task WriteJsonLinesAsync(
+        TextWriter writer,
+        GenieResponse response,
+        string? agentTitle = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        ArgumentNullException.ThrowIfNull(response);
+
+        if (response.Result is null)
+        {
+            var envelope = JsonSerializer.Serialize(Envelope.From(response, agentTitle), CompactOptions);
+            await writer.WriteLineAsync(envelope.AsMemory(), cancellationToken).ConfigureAwait(false);
+            return;
         }
 
-        return builder.ToString();
+        ValidateRowObjectShape(response.Result);
+        var rowBuffer = new StringBuilder();
+        using var rowWriter = new StringWriter(rowBuffer, CultureInfo.InvariantCulture);
+        foreach (var row in response.Result.Rows)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            BuildRow(rowBuffer, rowWriter, response.Result.Columns, row);
+            foreach (var chunk in rowBuffer.GetChunks())
+            {
+                await writer.WriteAsync(chunk, cancellationToken).ConfigureAwait(false);
+            }
+
+            await writer.WriteLineAsync(ReadOnlyMemory<char>.Empty, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static void ValidateRowObjectShape(GenieQueryResult result)
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var column in result.Columns)
+        {
+            if (!names.Add(column.Name))
+            {
+                var displayName = column.Name.Length == 0 ? "<empty>" : column.Name;
+                throw new InvalidOperationException(
+                    $"JSONL cannot represent the duplicate column name '{displayName}' without losing a value. " +
+                    "Use JSON or CSV for this result.");
+            }
+        }
+
+        for (var rowIndex = 0; rowIndex < result.Rows.Count; rowIndex++)
+        {
+            var cellCount = result.Rows[rowIndex].Count;
+            if (cellCount > result.Columns.Count)
+            {
+                throw new InvalidOperationException(
+                    $"JSONL cannot represent row {rowIndex + 1}: it has {cellCount} cells but the schema " +
+                    $"declares {result.Columns.Count} columns. Use JSON or CSV for this result.");
+            }
+        }
+    }
+
+    private static void BuildRow(
+        StringBuilder buffer,
+        TextWriter writer,
+        IReadOnlyList<GenieColumn> columns,
+        IReadOnlyList<string?> row)
+    {
+        buffer.Clear();
+        writer.Write('{');
+        for (var index = 0; index < row.Count; index++)
+        {
+            if (index > 0)
+            {
+                writer.Write(',');
+            }
+
+            writer.Write('"');
+            RowJsonEncoder.Encode(writer, columns[index].Name);
+            writer.Write("\":");
+
+            if (row[index] is { } value)
+            {
+                writer.Write('"');
+                RowJsonEncoder.Encode(writer, value);
+                writer.Write('"');
+            }
+            else
+            {
+                writer.Write("null");
+            }
+        }
+
+        writer.Write('}');
+    }
+
+    private static void WriteLine(TextWriter writer, StringBuilder line)
+    {
+        foreach (var chunk in line.GetChunks())
+        {
+            writer.Write(chunk.Span);
+        }
+
+        writer.WriteLine();
     }
 
     private sealed record Envelope
@@ -213,16 +332,52 @@ public static class CsvWriter
     /// </remarks>
     public static string Write(GenieQueryResult result)
     {
-        var builder = new StringBuilder();
+        using var writer = new StringWriter(CultureInfo.InvariantCulture);
+        Write(writer, result);
+        return writer.ToString();
+    }
 
-        builder.AppendLine(string.Join(',', result.Columns.Select(c => Quote(c.Name))));
+    /// <summary>Writes CSV incrementally, retaining at most one rendered row at a time.</summary>
+    public static void Write(TextWriter writer, GenieQueryResult result)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        ArgumentNullException.ThrowIfNull(result);
 
+        foreach (var line in RenderLines(result))
+        {
+            writer.WriteLine(line);
+        }
+    }
+
+    /// <summary>Writes CSV asynchronously, retaining at most one rendered row at a time.</summary>
+    public static async Task WriteAsync(
+        TextWriter writer,
+        GenieQueryResult result,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        ArgumentNullException.ThrowIfNull(result);
+
+        using var lines = RenderLines(result).GetEnumerator();
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!lines.MoveNext())
+            {
+                return;
+            }
+
+            await writer.WriteLineAsync(lines.Current.AsMemory(), cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static IEnumerable<string> RenderLines(GenieQueryResult result)
+    {
+        yield return string.Join(',', result.Columns.Select(c => Quote(c.Name)));
         foreach (var row in result.Rows)
         {
-            builder.AppendLine(string.Join(',', row.Select(Quote)));
+            yield return string.Join(',', row.Select(Quote));
         }
-
-        return builder.ToString();
     }
 
     /// <summary>
@@ -241,6 +396,11 @@ public static class CsvWriter
         if (value is null)
         {
             return string.Empty;
+        }
+
+        if (value.Length == 0)
+        {
+            return "\"\"";
         }
 
         // A leading =, +, - or @ makes a spreadsheet treat the cell as a formula. Tab and
@@ -265,59 +425,74 @@ public static class MarkdownWriter
 {
     public static string Write(GenieResponse response, string? agentTitle = null)
     {
-        var builder = new StringBuilder();
+        using var writer = new StringWriter(CultureInfo.InvariantCulture);
+        Write(writer, response, agentTitle);
+        return writer.ToString();
+    }
 
+    /// <summary>Writes Markdown incrementally, retaining at most one rendered line at a time.</summary>
+    public static void Write(TextWriter writer, GenieResponse response, string? agentTitle = null)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        ArgumentNullException.ThrowIfNull(response);
+
+        foreach (var line in RenderLines(response, agentTitle))
+        {
+            writer.WriteLine(line);
+        }
+    }
+
+    /// <summary>Writes Markdown asynchronously, retaining at most one rendered line at a time.</summary>
+    public static async Task WriteAsync(
+        TextWriter writer,
+        GenieResponse response,
+        string? agentTitle = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        ArgumentNullException.ThrowIfNull(response);
+
+        using var lines = RenderLines(response, agentTitle).GetEnumerator();
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!lines.MoveNext())
+            {
+                return;
+            }
+
+            await writer.WriteLineAsync(lines.Current.AsMemory(), cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static IEnumerable<string> RenderLines(GenieResponse response, string? agentTitle)
+    {
         if (!string.IsNullOrWhiteSpace(response.Text))
         {
-            builder.AppendLine(TerminalSafety.Sanitize(response.Text)).AppendLine();
+            yield return TerminalSafety.Sanitize(response.Text);
+            yield return string.Empty;
         }
 
         if (response.Result is { Columns.Count: > 0 } result)
         {
-            WriteTable(builder, result);
+            foreach (var line in RenderTableLines(result))
+            {
+                yield return line;
+            }
         }
 
-        if (response.Query?.Sql is { Length: > 0 } sql)
+        if (response.Query is { Sql.Length: > 0 } query)
         {
-            builder.AppendLine("<details><summary>Generated SQL</summary>")
-                .AppendLine()
-                .AppendLine("```sql")
-                .AppendLine(TerminalSafety.Sanitize(sql))
-                .AppendLine("```")
-                .AppendLine();
-
-            WriteParameters(builder, response.Query?.Parameters);
-
-            builder.AppendLine("</details>")
-                .AppendLine();
+            foreach (var line in RenderSqlLines(query))
+            {
+                yield return line;
+            }
         }
 
         if (agentTitle is { Length: > 0 })
         {
-            builder.AppendLine(CultureInfo.InvariantCulture, $"_Agent: {agentTitle}_");
+            yield return $"_Agent: {agentTitle}_";
         }
-
-        return builder.ToString();
-    }
-
-    /// <summary>Lists the values bound into the statement, so its placeholders are explained.</summary>
-    private static void WriteParameters(StringBuilder builder, IReadOnlyList<GenieQueryParameter>? parameters)
-    {
-        if (parameters is not { Count: > 0 })
-        {
-            return;
-        }
-
-        builder.AppendLine("| Parameter | Type | Value |").AppendLine("|---|---|---|");
-        foreach (var parameter in parameters)
-        {
-            builder.Append("| ").Append(Escape(parameter.Keyword))
-                .Append(" | ").Append(Escape(parameter.SqlType))
-                .Append(" | ").Append(Escape(parameter.Value))
-                .AppendLine(" |");
-        }
-
-        builder.AppendLine();
     }
 
     /// <summary>
@@ -331,32 +506,139 @@ public static class MarkdownWriter
     /// </remarks>
     public static void WriteTable(StringBuilder builder, GenieQueryResult result)
     {
-        builder.Append("| ")
-            .Append(string.Join(" | ", result.Columns.Select(c => Escape(c.Name))))
-            .AppendLine(" |");
+        ArgumentNullException.ThrowIfNull(builder);
+        using var writer = new StringWriter(builder, CultureInfo.InvariantCulture);
+        WriteTable(writer, result);
+    }
 
-        builder.Append('|')
-            .Append(string.Concat(Enumerable.Repeat("---|", result.Columns.Count)))
-            .AppendLine();
+    /// <summary>Writes a Markdown table incrementally.</summary>
+    public static void WriteTable(TextWriter writer, GenieQueryResult result)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        ArgumentNullException.ThrowIfNull(result);
+
+        foreach (var line in RenderTableLines(result))
+        {
+            writer.WriteLine(line);
+        }
+    }
+
+    /// <summary>Writes a Markdown table asynchronously, observing cancellation between rows.</summary>
+    public static async Task WriteTableAsync(
+        TextWriter writer,
+        GenieQueryResult result,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        ArgumentNullException.ThrowIfNull(result);
+
+        using var lines = RenderTableLines(result).GetEnumerator();
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!lines.MoveNext())
+            {
+                return;
+            }
+
+            await writer.WriteLineAsync(
+                lines.Current.AsMemory(), cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Writes generated SQL and its bound values using the canonical report format.</summary>
+    public static void WriteSql(StringBuilder builder, GenieQuery query)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        using var writer = new StringWriter(builder, CultureInfo.InvariantCulture);
+        WriteSql(writer, query);
+    }
+
+    /// <summary>Writes generated SQL and its bound values incrementally.</summary>
+    public static void WriteSql(TextWriter writer, GenieQuery query)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        ArgumentNullException.ThrowIfNull(query);
+
+        foreach (var line in RenderSqlLines(query))
+        {
+            writer.WriteLine(line);
+        }
+    }
+
+    /// <summary>Writes generated SQL and its bound values asynchronously.</summary>
+    public static async Task WriteSqlAsync(
+        TextWriter writer,
+        GenieQuery query,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        ArgumentNullException.ThrowIfNull(query);
+
+        using var lines = RenderSqlLines(query).GetEnumerator();
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!lines.MoveNext())
+            {
+                return;
+            }
+
+            await writer.WriteLineAsync(
+                lines.Current.AsMemory(), cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static IEnumerable<string> RenderTableLines(GenieQueryResult result)
+    {
+        yield return $"| {string.Join(" | ", result.Columns.Select(c => Escape(c.Name)))} |";
+        yield return $"|{string.Concat(Enumerable.Repeat("---|", result.Columns.Count))}";
 
         foreach (var row in result.Rows)
         {
-            builder.Append("| ")
-                .Append(string.Join(" | ", row.Select(Escape)))
-                .AppendLine(" |");
+            yield return $"| {string.Join(" | ", row.Select(Escape))} |";
         }
 
-        builder.AppendLine();
+        yield return string.Empty;
 
         if (result.IsTruncated)
         {
-            var total = result.TotalRowCount is { } n
-                ? n.ToString(CultureInfo.InvariantCulture)
+            var total = result.TotalRowCount is { } count
+                ? count.ToString(CultureInfo.InvariantCulture)
                 : "an unknown number of";
-            builder.AppendLine(CultureInfo.InvariantCulture,
-                $"_Showing {result.RowCount} of {total} rows; the result was truncated by Databricks._")
-                .AppendLine();
+            yield return $"_Showing {result.RowCount} of {total} rows; the result was truncated by Databricks._";
+            yield return string.Empty;
         }
+    }
+
+    private static IEnumerable<string> RenderSqlLines(GenieQuery query)
+    {
+        if (string.IsNullOrEmpty(query.Sql))
+        {
+            yield break;
+        }
+
+        yield return "<details><summary>Generated SQL</summary>";
+        yield return string.Empty;
+        yield return "```sql";
+        yield return TerminalSafety.Sanitize(query.Sql);
+        yield return "```";
+        yield return string.Empty;
+
+        if (query.Parameters is { Count: > 0 } parameters)
+        {
+            yield return "| Parameter | Type | Value |";
+            yield return "|---|---|---|";
+            foreach (var parameter in parameters)
+            {
+                yield return $"| {Escape(parameter.Keyword)} | {Escape(parameter.SqlType)} | {Escape(parameter.Value)} |";
+            }
+
+            yield return string.Empty;
+        }
+
+        yield return "</details>";
+        yield return string.Empty;
     }
 
     // A null renders as an empty cell rather than the four letters "null", which would be
